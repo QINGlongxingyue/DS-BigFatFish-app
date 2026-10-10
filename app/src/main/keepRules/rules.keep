@@ -4,9 +4,26 @@
 # For more details, see
 #   https://d.android.com/r/tools/r8/keep-rules
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+# ---------------------------------------------------------------------------
+# Live2D Cubism Core
+#
+# libLive2DCubismCoreJNI.so 在 JNI_OnLoad 里按【类名字符串】去 FindClass 找这些类，
+# 一旦被 R8 改名或裁掉，加载 .so 时就直接 abort：
+#   Abort message: 'No pending exception expected:
+#     java.lang.ClassNotFoundException: com.live2d.sdk.cubism.core.CubismCanvasInfo'
+# 所以整包都要原样保留（体积影响很小）。
+# ---------------------------------------------------------------------------
+-keep class com.live2d.sdk.cubism.core.** { *; }
+-keep class com.live2d.sdk.cubism.framework.** { *; }
+
+# ---------------------------------------------------------------------------
+# sherpa-onnx（本地 ASR）
+#
+# Kotlin 层用 external/native 方法与 .so 互通，同样不能改名。
+# ---------------------------------------------------------------------------
+-keep class com.k2fsa.sherpa.onnx.** { *; }
+
+# 所有 native 方法所在类保持名字（覆盖 Live2D / sherpa / 其它 JNI）
+-keepclasseswithmembernames class * {
+    native <methods>;
+}

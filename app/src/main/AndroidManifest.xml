@@ -4,6 +4,8 @@
 
     <!-- 对话要调 DeepSeek API -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 本地语音识别（麦克风录音） -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
     <application
         android:name=".DSAIApp"

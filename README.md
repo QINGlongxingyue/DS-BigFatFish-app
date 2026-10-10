@@ -18,6 +18,8 @@
   - 「开心 / 哈哈」→ 笑；「生气」→ 脸黑；「害羞」→ 脸红
   - 「思考 / 想想」→ DeepSeek 播 thinking 动作
   - 「好吃 / 馋」→ 流口水……完整映射见 `app/src/main/java/com/example/dsaiapp/chat/ModelReactions.kt`
+- **本地离线语音输入**：左下角电话图标，按下开始录音、再按一下识别成文字填进输入框。
+  跑的是**阿里达摩院 FunASR 的 Paraformer 中文模型**，全在本机推理，不联网、不花 API 的钱、录音不出手机
 - **待机动画**：眨眼 / 呼吸 / 视线跟随手指（手写参数驱动，不依赖动作文件）
 - **水印隐藏**：大肥鱼的水印参数每帧压制
 - 深海主题 UI：Compose + Material3，气泡聊天、正在输入指示
@@ -34,13 +36,20 @@
 $env:JAVA_HOME = "C:\Program Files\Android\Android Studio\jbr"   # 需要 JDK 17+，用 AS 自带 JBR 最稳
 .\gradlew.bat :app:assembleDebug
 # 产物：app\build\outputs\apk\debug\app-debug.apk
+
+# 给手机装的话建议打 release（R8 压缩 + 只带 64 位原生库，约 148MB，debug 包会到 195MB）
+.\gradlew.bat :app:assembleRelease
+# release 已配置成用 debug 签名，所以能直接安装
 ```
 
 踩过的坑：
 
 - 不要用系统 PATH 里的 JDK 8 编译，AGP 会直接失败
 - 工程刻意不用 `jvmToolchain()`——它会去 github.com 下载 JDK，网络不通时构建必挂；改用 `compileOptions` 加 `jvmTarget` 对齐字节码，不联网
-- 最低 API 24，target 37；原生库只有 arm64-v8a / x86 / x86_64（Core AAR 自带）
+- 最低 API 24，target 37；原生库只带 arm64-v8a / x86_64（真机 + 64 位模拟器够了，砍掉 32 位 x86 省约 36MB）
+- **别引 `material-icons-extended`**：那套库 5000+ 图标 × 5 风格，不开 R8 的 debug 包会因此多出约 79MB 的 dex。
+  本项目只用核心图标集（Settings / Phone / Send），切换图标是本地矢量 `res/drawable/ic_swap_horiz.xml`
+- 开 R8 后必须保留 JNI 相关的类，见 `app/src/main/keepRules/rules.keep`（原因写在文件注释里，是真实踩出来的）
 
 ## 使用
 
@@ -48,12 +57,33 @@ $env:JAVA_HOME = "C:\Program Files\Android\Android Studio\jbr"   # 需要 JDK 17
 2. 点左上角设置按钮，填入在 platform.deepseek.com 申请的 API Key
 3. 底部输入框开聊；没填 Key 会提示
 4. 右上角胶囊按钮切换 大肥鱼 / DeepSeek
+5. 想说话就点左下角**电话图标**：变红 = 正在录音，再点一下 = 停止并识别，文字会填进输入框
+
+## 语音识别（本地离线 ASR）
+
+- **模型**：阿里达摩院 FunASR 的 **Paraformer-zh-small**（2024-03-09 版），经 [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) 导出成 onnx
+- **运行时**：sherpa-onnx 官方 Android AAR（`app/libs/sherpa-onnx-1.13.8.aar`，含各 ABI 的 so + Kotlin API）
+- **流程**：`AudioRecord` 录 16kHz 单声道 → 按下停止时把整段音频喂给 Paraformer 解码 → 文字追加到输入框
+- **实测速度**（模拟器 CPU）：模型加载约 1.5~2.6 秒；3 秒音频解码 66ms、33 秒音频 750ms
+- **模型参数**写在 `app/src/main/java/com/example/dsaiapp/asr/AsrEngine.kt` 顶部（`MODEL` / `TOKENS` 常量），
+  换模型只要替换 `app/src/main/assets/asr/` 下的文件
+- 录音上限 60 秒（超过自动停止并识别），识别为空会提示重说，不会崩
+
+### 模型与运行时的版本要对上（重要）
+
+sherpa-onnx **初始化失败时会直接 `exit(-1)`**（表现为进程静默消失、无 Java 异常，
+`dumpsys activity exit-info` 里是 `reason=1 (EXIT_SELF) status=255`）。
+最常见的原因就是**模型太旧、元数据对不上**：例如 `streaming-zipformer-multi-zh-hans-int8-2023-12-13`
+配 1.13.8 运行时会在读 encoder metadata 时报 `'attention_dims' does not exist in the metadata` 然后退出。
+换用与运行时同代的模型（如这里的 Paraformer-2024）即可。
 
 ## 目录结构
 
 ```text
 app/src/main/java/com/example/dsaiapp/
-├── MainActivity.kt          # 全部 UI（Compose）：顶栏 / 舞台 / 聊天 / 设置对话框
+├── MainActivity.kt          # 全部 UI（Compose）：顶栏 / 舞台 / 聊天 / 设置对话框 / 输入栏（含语音按钮）
+├── asr/
+│   └── AsrEngine.kt         # 本地离线 ASR：录音 + Paraformer 解码（sherpa-onnx）
 ├── chat/
 │   ├── DeepSeekClient.kt    # DeepSeek API 最小客户端（HttpURLConnection + org.json，零依赖）
 │   └── ModelReactions.kt    # 回复关键字 → 表情/动作 映射表
@@ -65,10 +95,17 @@ app/src/main/java/com/example/dsaiapp/
 │   └── CubismPal.java       # 平台胶水：assets 读文件 / 日志
 └── ui/                      # Compose 包装 + 主题配色
 app/src/main/java/com/live2d/…      # Cubism SDK for Java 5-r.5 框架源码
-app/src/main/assets/live2d/         # 两只模型的 model3.json / moc3 / 贴图 / 表情 / 动作
+app/src/main/assets/live2d/         # 两只 Live2D 模型的 model3.json / moc3 / 贴图 / 表情 / 动作
+app/src/main/assets/asr/            # Paraformer 语音模型（model.int8.onnx 约 78MB + tokens.txt）
 app/libs/Live2DCubismCore.aar       # Cubism Core（含各 ABI 的 so）
-THIRD-PARTY-LICENSES.md             # 两个模型的署名与开源协议（必读）
+app/libs/sherpa-onnx-1.13.8.aar     # ASR 运行时（含各 ABI 的 so + Kotlin API）
+app/src/main/keepRules/rules.keep   # R8 必须保留的 JNI 类（Live2D Core / sherpa-onnx）
+THIRD-PARTY-LICENSES.md             # 模型与第三方组件的署名、开源协议（必读）
 ```
+
+> 仓库里最大的两个文件是 ASR 模型（78MB）和 sherpa-onnx AAR（48MB）——它们让仓库能直接构建出可用 App，
+> 但也让 git 仓库变重（约 136MB）。不想要大文件的话，把这两项从 git 里去掉，改成首次运行时从
+> [sherpa-onnx releases](https://github.com/k2-fsa/sherpa-onnx/releases) 下载也可以。
 
 ## 排查备忘
 
@@ -76,6 +113,9 @@ THIRD-PARTY-LICENSES.md             # 两个模型的署名与开源协议（必
 | --- | --- |
 | 模型整体黑色剪影 | 纹理没生成 mipmap，而框架绘制时用 mipmap 过滤采样，不完整纹理采出纯黑。上传后必须调 glGenerateMipmap |
 | 模型消失 / 只剩背景 | 渲染器创建前没设置离屏目标尺寸；或 GL 上下文重建后没有重建渲染器和纹理绑定 |
+| 开 R8 后一启动就闪退 | Live2D Core 的 `JNI_OnLoad` 按类名 `FindClass` 找类，被 R8 改名就 `ClassNotFoundException` 直接 abort。见 `keepRules/rules.keep` |
+| 语音按钮一按进程就没了 | sherpa-onnx 模型初始化失败会 `exit(-1)`（`exit-info` 里 `reason=1 (EXIT_SELF) status=255`），通常是模型与运行时版本不匹配 |
+| 语音识别总是"没听清" | 模拟器的虚拟麦克风基本收不到人声，真机测试才准；也确认已授予录音权限 |
 | 模拟器里 DNS/网络报错 | 校园网等环境下模拟器 NAT 容易失效，真机加正常网络即可，跟 API Key 无关 |
 | gradle 锁文件拒绝访问 | 命令行构建要写用户目录下的 .gradle，沙箱或权限需放行该目录 |
 
@@ -86,11 +126,14 @@ THIRD-PARTY-LICENSES.md             # 两个模型的署名与开源协议（必
 - **模型1「大肥鱼」**：作者 **B站 @Mao绒绒家园**
 - **模型2「DeepSeek」**：来源 github.com/lrplrplrp/dsh-live2d，协议 Apache License 2.0
 - **Cubism SDK for Java 5-r.5**：© Live2D Inc.，Live2D Open Software License；公开分发前请自行确认 Live2D 的 SDK 发行许可（个人/小规模通常免费，商用前问一次 Live2D 官方）
+- **语音识别模型**：阿里达摩院 **FunASR / Paraformer**（经 sherpa-onnx 导出为 onnx），协议以 FunASR 与模型仓库说明为准
+- **sherpa-onnx**：k2-fsa 开源项目（Apache License 2.0），提供本地推理运行时
 - API 服务：DeepSeek Open Platform（platform.deepseek.com）
 
 ## TODO
 
 - [ ] 口型同步（TTS 音量包络驱动嘴型，接口已留好 Live2DController.setMouthOpen）
+- [ ] 语音输入加 VAD 自动断句（现在要手动按第二下停止）
 - [ ] 流式输出（SSE）
 - [ ] 对话历史持久化
 - [ ] 表情随 API 返回的结构化情绪标签联动（现在是文本关键字匹配）

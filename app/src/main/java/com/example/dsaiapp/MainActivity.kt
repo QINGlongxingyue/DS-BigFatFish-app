@@ -1,13 +1,17 @@
 package com.example.dsaiapp
 
+import android.Manifest
 import android.content.Context
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -32,9 +36,10 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
@@ -57,10 +62,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.dsaiapp.asr.AsrEngine
 import com.example.dsaiapp.chat.DeepSeekClient
 import com.example.dsaiapp.chat.ModelReactions
 import com.example.dsaiapp.ui.live2d.Live2DController
@@ -77,8 +84,10 @@ import com.example.dsaiapp.ui.theme.TextSecondary
 import com.example.dsaiapp.ui.theme.WhaleBlue
 import com.example.dsaiapp.ui.theme.WhaleBlueDark
 import com.example.dsaiapp.ui.theme.WhaleCyan
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -122,7 +131,53 @@ private fun ChatScreen() {
     var apiKey by remember { mutableStateOf(prefs.getString(PREF_KEY, "") ?: "") }
     var showSettings by remember { mutableStateOf(false) }
     var isTyping by remember { mutableStateOf(false) }
+
+    // ---- 本地语音识别（离线 ASR）----
+    val asr = remember { AsrEngine(context) }
+    var asrOn by remember { mutableStateOf(false) }
+    var asrBusy by remember { mutableStateOf(false) }
+    var micLevel by remember { mutableStateOf(0f) }
     val scope = rememberCoroutineScope()
+
+    // 识别结果接到输入框后面（可以一句话一句话地攒）；出错就在聊天里说一声
+    LaunchedEffect(asr) {
+        asr.onResult = { text ->
+            asrBusy = false
+            input = if (input.isBlank()) text else input.trimEnd() + " " + text
+        }
+        asr.onError = { msg ->
+            asrBusy = false
+            messages.add(ChatMessage(nextId++, msg, fromUser = false))
+        }
+        asr.onLevel = { level -> micLevel = level }
+    }
+
+    val startAsr: () -> Unit = {
+        asrOn = true
+        scope.launch {
+            if (!asr.isReady) {
+                asrBusy = true
+                val ok = withContext(Dispatchers.IO) { asr.prepare() }
+                asrBusy = false
+                if (!ok) asrOn = false
+            }
+            if (asrOn) asr.start()
+        }
+    }
+
+    val stopAsr: () -> Unit = {
+        asrOn = false
+        micLevel = 0f
+        asrBusy = true
+        asr.stopAndDecode()
+    }
+
+    val micPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) startAsr()
+        else messages.add(ChatMessage(nextId++, "没有麦克风权限呀，语音输入用不了 (｡•́︿•̀｡)", fromUser = false))
+    }
 
     // 启动自检：延迟到 GL 线程把模型加载完，再统一判断。
     LaunchedEffect(Unit) {
@@ -142,7 +197,10 @@ private fun ChatScreen() {
     }
 
     DisposableEffect(Unit) {
-        onDispose { Live2DController.detach() }
+        onDispose {
+            asr.release()
+            Live2DController.detach()
+        }
     }
 
     // 新消息进来自动滚到底
@@ -208,9 +266,23 @@ private fun ChatScreen() {
         InputBar(
             value = input,
             onValueChange = { input = it },
+            asrOn = asrOn,
+            asrLoading = asrBusy,
+            micLevel = micLevel,
+            onMicClick = {
+                if (asrOn) {
+                    stopAsr()
+                } else if (asr.hasPermission()) {
+                    startAsr()
+                } else {
+                    micPermission.launch(Manifest.permission.RECORD_AUDIO)
+                }
+            },
             onSend = {
                 val text = input.trim()
                 if (text.isNotEmpty()) {
+                    // 发送时把语音输入停掉，免得边发边录
+                    if (asrOn) stopAsr()
                     messages.add(ChatMessage(nextId++, text, fromUser = true))
                     input = ""
 
@@ -343,7 +415,7 @@ private fun ModelSwitchButton(modelName: String, onClick: () -> Unit) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(
-            imageVector = Icons.Filled.SwapHoriz,
+            painter = painterResource(id = R.drawable.ic_swap_horiz),
             contentDescription = "切换模型",
             tint = WhaleCyan,
             modifier = Modifier.size(18.dp),
@@ -447,6 +519,10 @@ private fun InputBar(
     value: String,
     onValueChange: (String) -> Unit,
     onSend: () -> Unit,
+    asrOn: Boolean,
+    asrLoading: Boolean,
+    micLevel: Float,
+    onMicClick: () -> Unit,
 ) {
     Row(
         modifier = Modifier
@@ -455,11 +531,26 @@ private fun InputBar(
             .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        // 左下角：电话图标 = 本地语音输入开关
+        MicButton(on = asrOn, loading = asrLoading, level = micLevel, onClick = onMicClick)
+
+        Spacer(modifier = Modifier.width(8.dp))
+
         OutlinedTextField(
             value = value,
             onValueChange = onValueChange,
             modifier = Modifier.weight(1f),
-            placeholder = { Text("跟大肥鱼说点什么…", color = TextSecondary, fontSize = 14.sp) },
+            placeholder = {
+                Text(
+                    text = when {
+                        asrLoading -> "识别中…"
+                        asrOn -> "正在听，说完再点一下电话～"
+                        else -> "跟大肥鱼说点什么…"
+                    },
+                    color = TextSecondary,
+                    fontSize = 14.sp,
+                )
+            },
             maxLines = 4,
             shape = RoundedCornerShape(22.dp),
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
@@ -467,7 +558,7 @@ private fun InputBar(
             colors = OutlinedTextFieldDefaults.colors(
                 focusedTextColor = TextPrimary,
                 unfocusedTextColor = TextPrimary,
-                focusedBorderColor = WhaleBlue,
+                focusedBorderColor = if (asrOn) Color(0xFFFF6B7A) else WhaleBlue,
                 unfocusedBorderColor = DeepSeaCard,
                 cursorColor = WhaleBlue,
             ),
@@ -485,6 +576,53 @@ private fun InputBar(
                 imageVector = Icons.AutoMirrored.Filled.Send,
                 contentDescription = "发送",
                 tint = DeepSea,
+            )
+        }
+    }
+}
+
+/**
+ * 左下角的电话图标：点亮 = 正在用本地 ASR 听你说话。
+ *
+ * <p>录音时按钮变红，外圈随说话音量呼吸，说话就能看见反馈。
+ */
+@Composable
+private fun MicButton(
+    on: Boolean,
+    loading: Boolean,
+    level: Float,
+    onClick: () -> Unit,
+) {
+    val bg by animateColorAsState(
+        targetValue = if (on) Color(0xFFFF4D5E) else DeepSeaCard,
+        animationSpec = tween(220),
+        label = "micBg",
+    )
+    val ringAlpha = if (on) (0.25f + 0.75f * level) else 0f
+
+    IconButton(
+        onClick = onClick,
+        modifier = Modifier
+            .size(46.dp)
+            .background(bg, RoundedCornerShape(23.dp))
+            .border(
+                width = 2.dp,
+                color = Color(0xFFFF8A94).copy(alpha = ringAlpha),
+                shape = RoundedCornerShape(23.dp),
+            ),
+    ) {
+        if (loading) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(20.dp),
+                color = WhaleCyan,
+                strokeWidth = 2.dp,
+            )
+        } else {
+            Icon(
+                imageVector = Icons.Filled.Phone,
+                contentDescription = if (on) "停止语音输入" else "语音输入",
+                tint = if (on) Color.White else WhaleCyan,
+                modifier = Modifier.size(22.dp),
             )
         }
     }

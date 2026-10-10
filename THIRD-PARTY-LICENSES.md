@@ -26,6 +26,12 @@
 - **Cubism SDK for Java 5-r.5**（框架源码内嵌 + Core 运行库 AAR）：© Live2D Inc.，
   遵循 Live2D Open Software License。公开分发前请自行确认 Live2D 的 SDK 发行许可
   （个人/小规模通常免费，商用前建议咨询 [Live2D 官方](https://www.live2d.jp/chn/contact/)）
+- **语音识别模型**：**阿里达摩院 FunASR / Paraformer-zh-small**（2024-03-09），
+  在本项目里以 onnx 形式内置于 `app/src/main/assets/asr/`。
+  FunASR 为开源项目（https://github.com/modelscope/FunASR），模型使用请遵循其仓库与模型页说明。
+  本项目所用 onnx 版本由 [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) 导出
+- **sherpa-onnx 1.13.8**（本地推理运行时，`app/libs/sherpa-onnx-1.13.8.aar`）：
+  k2-fsa 开源项目，**Apache License 2.0**（协议全文见本文件末尾）
 - **API 服务**：[DeepSeek Open Platform](https://platform.deepseek.com)
 
 ---

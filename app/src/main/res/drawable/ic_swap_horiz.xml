@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 模型切换图标（Material swap_horiz）。放本地是为了不引入 material-icons-extended
+     那套 5000+ 图标的库——它在不开 R8 的 debug 包里会撑出几十 MB 的 dex。
+     颜色交给 Compose 的 Icon(tint=...) 处理，这里不写 tint。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M6.99,11L3,15l3.99,4v-3H14v-2H6.99v-3zM21,9l-3.99,-4v3H10v2h7.01v3L21,9z" />
+</vector>

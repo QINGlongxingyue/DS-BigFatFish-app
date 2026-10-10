@@ -18,17 +18,20 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-        // Live2D Cubism Core 自带的原生库只有 arm64-v8a / x86 / x86_64
-        // AAR 里没有 armeabi-v7a，写进去会在打包时找不到 .so
+        // 只带 64 位：真机是 arm64-v8a，模拟器是 x86_64。
+        // 32 位的 x86 库（onnxruntime + sherpa 约 36MB）没有任何目标设备需要，砍掉。
+        // 注意 Live2D Cubism Core 的 AAR 本身也不含 armeabi-v7a。
         ndk {
-            abiFilters += listOf("arm64-v8a", "x86", "x86_64")
+            abiFilters += listOf("arm64-v8a", "x86_64")
         }
     }
 
     buildTypes {
         release {
+            // 用 debug 签名给 release 包签名：这样 R8 压缩过的包也能直接装到手机
+            signingConfig = signingConfigs.getByName("debug")
             optimization {
-                enable = false
+                enable = true
             }
         }
     }
@@ -56,6 +59,12 @@ android {
         }
     }
 
+    androidResources {
+        // ASR 的 onnx 模型不能压缩：不压缩才能内存映射直接读，
+        // 否则每次初始化都要把它整个解压进内存
+        noCompress += listOf("onnx")
+    }
+
     lint {
         abortOnError = false
     }
@@ -74,11 +83,16 @@ dependencies {
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.ui.graphics)
     implementation(libs.androidx.compose.ui.tooling.preview)
+    // 核心图标集（Settings / Phone / Send），版本由 Compose BOM 统一管理
+    implementation("androidx.compose.material:material-icons-core")
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.lifecycle.runtime.compose)
-    implementation(libs.androidx.compose.material.icons.extended)
+
+    // ⚠️ 刻意不引 androidx.compose.material.icons.extended：那套库含 5000+ 图标 × 5 种风格，
+    // 不开 R8 的 debug 包会因此多出几十 MB 的 dex。用到的图标走 material-icons-core
+    // （Settings / Phone / Send 都在核心集里），切换图标用本地矢量 ic_swap_horiz.xml。
 
     // Live2D Cubism Core：libLive2DCubismCoreJNI.so + com.live2d.sdk.cubism.core.*
     implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar", "*.jar"))))
