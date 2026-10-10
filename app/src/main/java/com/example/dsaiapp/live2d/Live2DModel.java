@@ -62,6 +62,23 @@ public final class Live2DModel extends CubismUserModel {
     private final Map<String, CubismMotion> motionMap = new HashMap<>();
     private boolean hasIdleMotion = false;
 
+    /** 表情自动消退：触发后随机 4~7 秒回到默认状态。 */
+    private static final long EXPRESSION_MIN_MS = 4000L;
+    private static final long EXPRESSION_MAX_MS = 7000L;
+
+    /** 表情淡入淡出时长（秒）：框架默认是 -1（等于硬切），显式设上才"自然"。 */
+    private static final float EXPRESSION_FADE_IN = 0.35f;
+    private static final float EXPRESSION_FADE_OUT = 0.8f;
+
+    /** 当前表情的到期时间戳（毫秒）；0 表示没有生效中的表情。 */
+    private long expressionUntilMs = 0L;
+
+    /**
+     * 空白表情（Parameters 为空）：到期时启动它，框架会给上一个表情设上淡出，
+     * 于是参数平滑回到默认，而不是"啪"一下跳回去。
+     */
+    private ACubismMotion neutralExpression;
+
     /**
      * 水印隐藏参数：从 model3.json 注册的 watermark_off 表情（exp13 水印消除，
      * Paramcol_3 = 1.0）里解析出来，每帧压进模型。
@@ -368,6 +385,20 @@ public final class Live2DModel extends CubismUserModel {
 
         model.saveParameters();
 
+        // 表情自动消退：Cubism 的表达式一旦开始会一直生效（不自动淡出），
+        // 到点就启动空白表情，框架会给当前表情设上淡出 → 参数平滑回到默认。
+        if (expressionUntilMs > 0L && System.currentTimeMillis() >= expressionUntilMs) {
+            expressionUntilMs = 0L;
+            final ACubismMotion neutral = getNeutralExpression();
+            if (neutral != null) {
+                expressionManager.startMotionPriority(neutral, PRIORITY_FORCE);
+                CubismPal.log("表情到期，开始淡出回默认");
+            } else {
+                expressionManager.stopAllMotions();
+                CubismPal.log("表情到期（无空白表情，直接复位）");
+            }
+        }
+
         // 表情 / 物理
         updateScheduler.onLateUpdate(model, dt);
 
@@ -458,7 +489,41 @@ public final class Live2DModel extends CubismUserModel {
             CubismPal.log("没有这个表情: " + name + "（现有: " + expressionMap.keySet() + "）");
             return;
         }
+        // 显式设淡入淡出：框架默认 -1 等于硬切，看着很生硬
+        motion.setFadeInTime(EXPRESSION_FADE_IN);
+        motion.setFadeOutTime(EXPRESSION_FADE_OUT);
         expressionManager.startMotionPriority(motion, PRIORITY_FORCE);
+
+        // 随机 4~7 秒后自动回到默认状态：表达式本身不会自己消失，必须定时停
+        final long keepMs = EXPRESSION_MIN_MS +
+                (long) (Math.random() * (EXPRESSION_MAX_MS - EXPRESSION_MIN_MS));
+        expressionUntilMs = System.currentTimeMillis() + keepMs;
+        CubismPal.log("表情 " + name + " 生效 " + (keepMs / 1000f) + " 秒");
+    }
+
+    /**
+     * 取（并缓存）空白表情。它不带任何参数，纯粹用来当"淡出触发器"：
+     * startMotion 会给当前表情设上淡出，而它自己什么都不改。
+     */
+    private ACubismMotion getNeutralExpression() {
+        if (neutralExpression == null) {
+            final byte[] json = "{\"Type\":\"Live2D Expression\",\"Parameters\":[]}"
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            neutralExpression = loadExpression(json);
+            if (neutralExpression != null) {
+                // ⚠️ 淡入必须和淡出一样长：框架在「最新表情淡入到 1」时会立刻删掉旧表情，
+                // 淡入太快（比如 0.01s）旧表情下一帧就被移除，淡出根本来不及播。
+                neutralExpression.setFadeInTime(EXPRESSION_FADE_OUT);
+                neutralExpression.setFadeOutTime(EXPRESSION_FADE_OUT);
+            }
+        }
+        return neutralExpression;
+    }
+
+    /** 立刻取消当前表情，回到默认状态（硬切；自动消退走的是淡出路径）。 */
+    public void clearExpression() {
+        expressionUntilMs = 0L;
+        expressionManager.stopAllMotions();
     }
 
     public String[] expressionNames() {

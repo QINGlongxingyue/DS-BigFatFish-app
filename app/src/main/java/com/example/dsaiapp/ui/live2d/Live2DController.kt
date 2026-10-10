@@ -43,6 +43,11 @@ object Live2DController {
         Live2DDelegate.getInstance().model?.setExpression(name)
     }
 
+    /** 立刻取消当前表情，回到默认状态。 */
+    fun clearExpression() = onGl {
+        Live2DDelegate.getInstance().model?.clearExpression()
+    }
+
     fun setMouthOpen(value: Float) = onGl {
         Live2DDelegate.getInstance().model?.setMouthOpen(value)
     }
