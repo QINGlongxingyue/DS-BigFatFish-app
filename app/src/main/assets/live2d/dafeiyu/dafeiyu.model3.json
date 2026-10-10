@@ -1,0 +1,40 @@
+{
+	"Version": 3,
+	"FileReferences": {
+		"Moc": "dafeiyu.moc3",
+		"Textures": [
+			"tex/texture_00.png"
+		],
+		"Physics": "dafeiyu.physics3.json",
+		"DisplayInfo": "dafeiyu.cdi3.json",
+		"Expressions": [
+			{ "Name": "mouth_switch",    "File": "exp/exp01_mouth_switch.exp3.json" },
+			{ "Name": "mouth3",          "File": "exp/exp02_mouth3.exp3.json" },
+			{ "Name": "grin",            "File": "exp/exp02_grin.exp3.json" },
+			{ "Name": "dark_face",       "File": "exp/exp03_dark_face.exp3.json" },
+			{ "Name": "blush",           "File": "exp/exp04_blush.exp3.json" },
+			{ "Name": "oo",              "File": "exp/exp05_oo.exp3.json" },
+			{ "Name": "squint",          "File": "exp/exp05_squint.exp3.json" },
+			{ "Name": "x_eyes",          "File": "exp/exp06_x_eyes.exp3.json" },
+			{ "Name": "drool",           "File": "exp/exp07_drool.exp3.json" },
+			{ "Name": "o_mouth",         "File": "exp/exp08_o_mouth.exp3.json" },
+			{ "Name": "worried_mouth",   "File": "exp/exp08_worried_mouth.exp3.json" },
+			{ "Name": "chestnut_mouth",  "File": "exp/exp08_chestnut_mouth.exp3.json" },
+			{ "Name": "tail_off",        "File": "exp/exp11_tail_off.exp3.json" },
+			{ "Name": "ears_off",        "File": "exp/exp12_ears_off.exp3.json" },
+			{ "Name": "watermark_off",   "File": "exp/exp13_watermark_off.exp3.json" }
+		]
+	},
+	"Groups": [
+		{
+			"Target": "Parameter",
+			"Name": "EyeBlink",
+			"Ids": []
+		},
+		{
+			"Target": "Parameter",
+			"Name": "LipSync",
+			"Ids": []
+		}
+	]
+}
