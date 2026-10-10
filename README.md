@@ -20,6 +20,8 @@
   - 「好吃 / 馋」→ 流口水……完整映射见 `app/src/main/java/com/example/dsaiapp/chat/ModelReactions.kt`
 - **本地离线语音输入**：左下角电话图标，按下开始录音、再按一下识别成文字填进输入框。
   跑的是**阿里达摩院 FunASR 的 Paraformer 中文模型**，全在本机推理，不联网、不花 API 的钱、录音不出手机
+- **语音朗读回复**：接 **豆包（火山引擎）双向流式 TTS**，AI 回复自动念出来；
+  播放时用音量驱动 Live2D 口型，模型会跟着「说话」
 - **待机动画**：眨眼 / 呼吸 / 视线跟随手指（手写参数驱动，不依赖动作文件）
 - **水印隐藏**：大肥鱼的水印参数每帧压制
 - 深海主题 UI：Compose + Material3，气泡聊天、正在输入指示
@@ -54,10 +56,31 @@ $env:JAVA_HOME = "C:\Program Files\Android\Android Studio\jbr"   # 需要 JDK 17
 ## 使用
 
 1. 装上 App，等模型加载（首帧 3 到 5 秒）
-2. 点左上角设置按钮，填入在 platform.deepseek.com 申请的 API Key
+2. 点左上角设置按钮：
+   - **DeepSeek 对话**：填 API Key（在 platform.deepseek.com 申请）
+   - **豆包语音朗读**：填 App ID / Access Token / 音色 ID（在火山引擎控制台开通「语音合成大模型」后获取），
+     打开「自动朗读回复」，可以点「试听一句」当场验证
 3. 底部输入框开聊；没填 Key 会提示
 4. 右上角胶囊按钮切换 大肥鱼 / DeepSeek
 5. 想说话就点左下角**电话图标**：变红 = 正在录音，再点一下 = 停止并识别，文字会填进输入框
+
+## 语音朗读（豆包 TTS）
+
+- **接口**：火山引擎豆包**双向流式 TTS**（WebSocket），官方文档
+  [bidirectional-streaming-text-to-speech-websocket](https://docs.volcengine.com/docs/DoubaoVoice/bidirectional-streaming-text-to-speech-websocket?lang=zh)
+- **端点**：`wss://openspeech.bytedance.com/api/v3/tts/bidirection`
+- **鉴权**：`Authorization: Bearer;<Access Token>`（注意是**分号**）+ `X-Api-App-Key`（App ID）
+  + `X-Api-Access-Key` + `X-Api-Resource-Id` + `X-Api-Connect-Id`
+- **协议**：二进制帧 + 事件机。帧头 4 字节（`0x11` 版本 / `0x14` 客户端 / `0x94` 服务端响应 / `0xB4` 服务端音频，
+  JSON 不压缩），后面跟 event（i32 大端）、可选的 session_id、payload。
+  流程：`StartConnection(1)` → `ConnectionStarted(50)` → `StartSession(100)` → `SessionStarted(150)`
+  → `TaskRequest(200)`（带文本）→ 一串 `350/352/351`（音频在 `0xB4` 帧里）→ `FinishSession(102)` → `SessionFinished(152)` → `FinishConnection(2)`
+- **音频**：请求 PCM 24kHz 单声道，收到音频块立刻丢给 `AudioTrack` 边收边放（不用等整段合成完）
+- **口型同步**：播放线程顺便算每块 PCM 的 RMS，喂给 `Live2DController.setMouthOpen()`，模型嘴型跟着声音动
+- **打断（barge-in）**：发新消息或重新朗读时立刻关连接、清播放队列
+- **参数**：请求里的 `speaker` 就是音色 ID（如 `zh_female_cancan_mars_bigtts`）；
+  `X-Api-Resource-Id` 默认 `volc.service_type.10029`（语音合成大模型），换成 2.0 模型时改成 `seed-tts-2.0`
+- **服务端报错**会以 `0x94` 帧带回 `code` + `message`，App 直接把它显示成一条聊天气泡，方便对着改配置
 
 ## 语音识别（本地离线 ASR）
 
@@ -84,6 +107,8 @@ app/src/main/java/com/example/dsaiapp/
 ├── MainActivity.kt          # 全部 UI（Compose）：顶栏 / 舞台 / 聊天 / 设置对话框 / 输入栏（含语音按钮）
 ├── asr/
 │   └── AsrEngine.kt         # 本地离线 ASR：录音 + Paraformer 解码（sherpa-onnx）
+├── tts/
+│   └── TtsEngine.kt         # 豆包双向流式 TTS：WS 帧编解码 + AudioTrack 边收边放 + 口型音量
 ├── chat/
 │   ├── DeepSeekClient.kt    # DeepSeek API 最小客户端（HttpURLConnection + org.json，零依赖）
 │   └── ModelReactions.kt    # 回复关键字 → 表情/动作 映射表
@@ -100,7 +125,7 @@ app/src/main/assets/asr/            # Paraformer 语音模型（model.int8.onnx 
 app/libs/Live2DCubismCore.aar       # Cubism Core（含各 ABI 的 so）
 app/libs/sherpa-onnx-1.13.8.aar     # ASR 运行时（含各 ABI 的 so + Kotlin API）
 app/src/main/keepRules/rules.keep   # R8 必须保留的 JNI 类（Live2D Core / sherpa-onnx）
-THIRD-PARTY-LICENSES.md             # 模型与第三方组件的署名、开源协议（必读）
+LICENSE             # 模型与第三方组件的署名、开源协议（必读）
 ```
 
 > 仓库里最大的两个文件是 ASR 模型（78MB）和 sherpa-onnx AAR（48MB）——它们让仓库能直接构建出可用 App，
@@ -116,24 +141,27 @@ THIRD-PARTY-LICENSES.md             # 模型与第三方组件的署名、开源
 | 开 R8 后一启动就闪退 | Live2D Core 的 `JNI_OnLoad` 按类名 `FindClass` 找类，被 R8 改名就 `ClassNotFoundException` 直接 abort。见 `keepRules/rules.keep` |
 | 语音按钮一按进程就没了 | sherpa-onnx 模型初始化失败会 `exit(-1)`（`exit-info` 里 `reason=1 (EXIT_SELF) status=255`），通常是模型与运行时版本不匹配 |
 | 语音识别总是"没听清" | 模拟器的虚拟麦克风基本收不到人声，真机测试才准；也确认已授予录音权限 |
+| 朗读不出声 / 报「语音服务报错」 | 多半是凭证或资源 ID 不对：App ID、Access Token、音色 ID 三者要配套，资源 ID 默认 `volc.service_type.10029`。报错原文会显示在聊天气泡里 |
+| 朗读时提示连接失败 | TTS 是云端接口，模拟器/校园网连不上外网时会失败（离线 ASR 不受影响，它纯本地） |
 | 模拟器里 DNS/网络报错 | 校园网等环境下模拟器 NAT 容易失效，真机加正常网络即可，跟 API Key 无关 |
 | gradle 锁文件拒绝访问 | 命令行构建要写用户目录下的 .gradle，沙箱或权限需放行该目录 |
 
 ## 资源与致谢
 
-两个 Live2D 模型均为**开源模型，版权归原作者所有，本仓库按作者要求保留署名**。完整署名与协议全文见仓库根目录的 **THIRD-PARTY-LICENSES.md**：
+两个 Live2D 模型均为**开源模型，版权归原作者所有，本仓库按作者要求保留署名**。完整署名与协议全文见仓库根目录的 **LICENSE**：
 
 - **模型1「大肥鱼」**：作者 **B站 @Mao绒绒家园**
 - **模型2「DeepSeek」**：来源 github.com/lrplrplrp/dsh-live2d，协议 Apache License 2.0
 - **Cubism SDK for Java 5-r.5**：© Live2D Inc.，Live2D Open Software License；公开分发前请自行确认 Live2D 的 SDK 发行许可（个人/小规模通常免费，商用前问一次 Live2D 官方）
 - **语音识别模型**：阿里达摩院 **FunASR / Paraformer**（经 sherpa-onnx 导出为 onnx），协议以 FunASR 与模型仓库说明为准
 - **sherpa-onnx**：k2-fsa 开源项目（Apache License 2.0），提供本地推理运行时
+- **OkHttp**：Square 开源项目（Apache License 2.0），TTS 的 WebSocket 客户端
+- **语音合成服务**：[火山引擎豆包语音](https://www.volcengine.com/product/voice-tech)（TTS 为云端接口，按量计费，需自行开通）
 - API 服务：DeepSeek Open Platform（platform.deepseek.com）
 
 ## TODO
 
-- [ ] 口型同步（TTS 音量包络驱动嘴型，接口已留好 Live2DController.setMouthOpen）
 - [ ] 语音输入加 VAD 自动断句（现在要手动按第二下停止）
-- [ ] 流式输出（SSE）
+- [ ] 流式输出（SSE）+ 边生成边朗读
 - [ ] 对话历史持久化
 - [ ] 表情随 API 返回的结构化情绪标签联动（现在是文本关键字匹配）

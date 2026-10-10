@@ -97,6 +97,9 @@ dependencies {
     // Live2D Cubism Core：libLive2DCubismCoreJNI.so + com.live2d.sdk.cubism.core.*
     implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar", "*.jar"))))
 
+    // 豆包（火山引擎）双向流式 TTS 走 WebSocket，Android 没有内置 WS 客户端
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)

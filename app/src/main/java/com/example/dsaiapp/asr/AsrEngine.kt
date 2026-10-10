@@ -34,6 +34,18 @@ class AsrEngine(private val context: Context) {
 
         /** 录音上限 60 秒，防止忘了关把内存撑爆（16k 单声道 60s ≈ 1.9MB）。 */
         private const val MAX_SECONDS = 60
+
+        /**
+         * 电话式自动断句：连续静音这么久就认为这一句说完了，自动结束并识别。
+         * 想更灵敏就调小（比如 1200），想更宽容就调大。
+         */
+        private const val SILENCE_MS = 2000
+
+        /** RMS 低于这个值算「没声音」。安静环境约 0.005，底噪大的环境要调高。 */
+        private const val SILENCE_RMS = 0.012
+
+        /** 至少录到这么久才允许被静音判定结束，免得刚按下就立刻收尾。 */
+        private const val MIN_RECORD_MS = 600
     }
 
     /** 识别出的一句话（主线程回调）。 */
@@ -44,6 +56,9 @@ class AsrEngine(private val context: Context) {
 
     /** 录音电平 0~1，给按钮做呼吸效果（主线程回调）。 */
     var onLevel: ((Float) -> Unit)? = null
+
+    /** 检测到「说完了」（连续静音到点）时回调，UI 收到后走正常的收尾流程。 */
+    var onAutoStop: (() -> Unit)? = null
 
     private var recognizer: OfflineRecognizer? = null
     private var recorder: AudioRecord? = null
@@ -228,6 +243,11 @@ class AsrEngine(private val context: Context) {
     private fun recordLoop(rec: AudioRecord, bufSize: Int) {
         val shorts = ShortArray(bufSize)
         val maxSamples = SAMPLE_RATE * MAX_SECONDS
+        val minSamples = SAMPLE_RATE * MIN_RECORD_MS / 1000
+
+        /** 连续静音累计时长（毫秒），有声音就清零。 */
+        var silenceMs = 0L
+        var speechDetected = false
 
         while (running) {
             val n = rec.read(shorts, 0, shorts.size)
@@ -253,9 +273,30 @@ class AsrEngine(private val context: Context) {
             val level = (rms * 12).coerceIn(0.0, 1.0).toFloat()
             post { onLevel?.invoke(level) }
 
+            // ---- 电话式断句：连续静音 2 秒 = 这句说完了 ----
+            val blockMs = n * 1000L / SAMPLE_RATE
+            if (rms > SILENCE_RMS) {
+                if (!speechDetected) {
+                    speechDetected = true
+                    Log.d(TAG, "检测到说话")
+                }
+                silenceMs = 0
+            } else {
+                silenceMs += blockMs
+            }
+
+            if (silenceMs >= SILENCE_MS && sampleCount >= minSamples) {
+                Log.d(TAG, "静音 ${silenceMs}ms（说了话=$speechDetected），自动结束这一句")
+                post { onAutoStop?.invoke() }
+                break
+            }
+
             if (sampleCount >= maxSamples) {
                 Log.d(TAG, "达到 ${MAX_SECONDS}s 上限，自动停止")
-                post { onError?.invoke("录满 ${MAX_SECONDS} 秒了，先帮你转成文字～") }
+                post {
+                    onError?.invoke("录满 ${MAX_SECONDS} 秒了，先帮你转成文字～")
+                    onAutoStop?.invoke()
+                }
                 break
             }
         }

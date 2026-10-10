@@ -32,6 +32,9 @@
   本项目所用 onnx 版本由 [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) 导出
 - **sherpa-onnx 1.13.8**（本地推理运行时，`app/libs/sherpa-onnx-1.13.8.aar`）：
   k2-fsa 开源项目，**Apache License 2.0**（协议全文见本文件末尾）
+- **OkHttp 4.12**（TTS 的 WebSocket 客户端）：Square 开源项目，**Apache License 2.0**
+- **豆包语音合成（TTS）**：火山引擎线上服务（https://www.volcengine.com/product/voice-tech），
+  非本地组件；使用时需自行开通并遵守其服务条款，按量计费
 - **API 服务**：[DeepSeek Open Platform](https://platform.deepseek.com)
 
 ---

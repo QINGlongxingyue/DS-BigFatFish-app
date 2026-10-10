@@ -13,6 +13,8 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,6 +23,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -45,6 +48,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -70,6 +75,7 @@ import androidx.compose.ui.unit.sp
 import com.example.dsaiapp.asr.AsrEngine
 import com.example.dsaiapp.chat.DeepSeekClient
 import com.example.dsaiapp.chat.ModelReactions
+import com.example.dsaiapp.tts.TtsEngine
 import com.example.dsaiapp.ui.live2d.Live2DController
 import com.example.dsaiapp.ui.live2d.Live2DStage
 import com.example.dsaiapp.ui.theme.BubbleAi
@@ -119,6 +125,60 @@ private const val SYSTEM_PROMPT =
 private const val PREFS_NAME = "dsai_settings"
 private const val PREF_KEY = "deepseek_api_key"
 
+// ---- 豆包（火山引擎）TTS 设置 ----
+private const val PREF_TTS_APP_ID = "tts_app_id"
+private const val PREF_TTS_TOKEN = "tts_access_token"
+private const val PREF_TTS_SPEAKER = "tts_speaker"
+private const val PREF_TTS_RESOURCE = "tts_resource_id"
+private const val PREF_TTS_AUTO = "tts_auto_read"
+
+private const val DEFAULT_SPEAKER = "zh_female_cancan_mars_bigtts"
+
+/**
+ * 资源 ID 决定用哪条语音合成服务，必须和账号里开通的服务对上，否则握手就 403
+ * （`requested resource not granted`）：
+ * - `volc.megatts.default`：语音合成小模型（多数账号默认有，声音复刻的 S_ 音色走这条）
+ * - `volc.service_type.10029`：语音合成大模型
+ * - `seed-tts-2.0`：语音合成 2.0
+ */
+private const val DEFAULT_RESOURCE_ID = "volc.megatts.default"
+
+/** 豆包 TTS 的一整套设置。 */
+private data class TtsSettings(
+    val appId: String,
+    val token: String,
+    val speaker: String,
+    val resourceId: String,
+    val autoRead: Boolean,
+) {
+    fun toEngineConfig() = TtsEngine.Config(
+        appId = appId,
+        accessToken = token,
+        speaker = speaker,
+        resourceId = resourceId.ifBlank { DEFAULT_RESOURCE_ID },
+    )
+
+    fun isReady(): Boolean = autoRead && toEngineConfig().isComplete()
+}
+
+private fun loadTtsSettings(prefs: android.content.SharedPreferences) = TtsSettings(
+    appId = prefs.getString(PREF_TTS_APP_ID, "") ?: "",
+    token = prefs.getString(PREF_TTS_TOKEN, "") ?: "",
+    speaker = prefs.getString(PREF_TTS_SPEAKER, DEFAULT_SPEAKER) ?: DEFAULT_SPEAKER,
+    resourceId = prefs.getString(PREF_TTS_RESOURCE, DEFAULT_RESOURCE_ID) ?: DEFAULT_RESOURCE_ID,
+    autoRead = prefs.getBoolean(PREF_TTS_AUTO, true),
+)
+
+private fun saveTtsSettings(prefs: android.content.SharedPreferences, s: TtsSettings) {
+    prefs.edit()
+        .putString(PREF_TTS_APP_ID, s.appId)
+        .putString(PREF_TTS_TOKEN, s.token)
+        .putString(PREF_TTS_SPEAKER, s.speaker)
+        .putString(PREF_TTS_RESOURCE, s.resourceId)
+        .putBoolean(PREF_TTS_AUTO, s.autoRead)
+        .apply()
+}
+
 @Composable
 private fun ChatScreen() {
     val context = LocalContext.current
@@ -129,8 +189,13 @@ private fun ChatScreen() {
     var nextId by remember { mutableStateOf(1L) }
     var modelName by remember { mutableStateOf(Live2DController.currentModelName()) }
     var apiKey by remember { mutableStateOf(prefs.getString(PREF_KEY, "") ?: "") }
+    var ttsSettings by remember { mutableStateOf(loadTtsSettings(prefs)) }
     var showSettings by remember { mutableStateOf(false) }
     var isTyping by remember { mutableStateOf(false) }
+
+    // ---- 豆包 TTS 朗读 ----
+    val tts = remember { TtsEngine() }
+    var ttsOn by remember { mutableStateOf(false) }
 
     // ---- 本地语音识别（离线 ASR）----
     val asr = remember { AsrEngine(context) }
@@ -139,17 +204,15 @@ private fun ChatScreen() {
     var micLevel by remember { mutableStateOf(0f) }
     val scope = rememberCoroutineScope()
 
-    // 识别结果接到输入框后面（可以一句话一句话地攒）；出错就在聊天里说一声
-    LaunchedEffect(asr) {
-        asr.onResult = { text ->
-            asrBusy = false
-            input = if (input.isBlank()) text else input.trimEnd() + " " + text
+    // TTS 播放期间用音量驱动 Live2D 口型（顺带把"口型同步"这个 TODO 做掉）
+    LaunchedEffect(tts) {
+        tts.onStart = { ttsOn = true }
+        tts.onDone = {
+            ttsOn = false
+            Live2DController.setMouthOpen(0f)
         }
-        asr.onError = { msg ->
-            asrBusy = false
-            messages.add(ChatMessage(nextId++, msg, fromUser = false))
-        }
-        asr.onLevel = { level -> micLevel = level }
+        tts.onLevel = { level -> if (level > 0.02f) Live2DController.setMouthOpen(level) }
+        tts.onError = { msg -> messages.add(ChatMessage(nextId++, msg, fromUser = false)) }
     }
 
     val startAsr: () -> Unit = {
@@ -170,6 +233,21 @@ private fun ChatScreen() {
         micLevel = 0f
         asrBusy = true
         asr.stopAndDecode()
+    }
+
+    // 识别结果接到输入框后面（可以一句话一句话地攒）；出错就在聊天里说一声。
+    // 放在 stopAsr 之后注册，因为「静音自动断句」要复用同一套收尾流程。
+    LaunchedEffect(asr) {
+        asr.onResult = { text ->
+            asrBusy = false
+            input = if (input.isBlank()) text else input.trimEnd() + " " + text
+        }
+        asr.onError = { msg ->
+            asrBusy = false
+            messages.add(ChatMessage(nextId++, msg, fromUser = false))
+        }
+        asr.onLevel = { level -> micLevel = level }
+        asr.onAutoStop = { if (asrOn) stopAsr() }
     }
 
     val micPermission = rememberLauncherForActivityResult(
@@ -199,6 +277,7 @@ private fun ChatScreen() {
     DisposableEffect(Unit) {
         onDispose {
             asr.release()
+            tts.release()
             Live2DController.detach()
         }
     }
@@ -261,6 +340,16 @@ private fun ChatScreen() {
                     )
                 }
             }
+            if (ttsOn) {
+                item(key = "tts") {
+                    Text(
+                        text = "🔊 正在朗读…（发消息会立刻打断）",
+                        color = WhaleCyan,
+                        fontSize = 13.sp,
+                        modifier = Modifier.padding(start = 8.dp),
+                    )
+                }
+            }
         }
 
         InputBar(
@@ -281,8 +370,9 @@ private fun ChatScreen() {
             onSend = {
                 val text = input.trim()
                 if (text.isNotEmpty()) {
-                    // 发送时把语音输入停掉，免得边发边录
+                    // 发送时把语音输入停掉，免得边发边录；同时打断正在朗读的上一句
                     if (asrOn) stopAsr()
+                    tts.stop()
                     messages.add(ChatMessage(nextId++, text, fromUser = true))
                     input = ""
 
@@ -317,12 +407,17 @@ private fun ChatScreen() {
                         result.onSuccess { reply ->
                             messages.add(ChatMessage(nextId++, reply, fromUser = false))
                             Live2DController.speak()
-                            scope.launch {
-                                delay(900)
-                                Live2DController.setMouthOpen(0f)
-                            }
                             // 回复里的关键字 → 表情/动作
                             ModelReactions.react(reply, Live2DController.currentModelName())
+                            // 豆包 TTS 朗读（配好了才读）；没配就用简单的张嘴动画
+                            if (ttsSettings.isReady()) {
+                                tts.speak(reply, ttsSettings.toEngineConfig())
+                            } else {
+                                scope.launch {
+                                    delay(900)
+                                    Live2DController.setMouthOpen(0f)
+                                }
+                            }
                         }.onFailure { e ->
                             messages.add(
                                 ChatMessage(nextId++, "呜…调用出错了：${e.message}", fromUser = false)
@@ -336,11 +431,20 @@ private fun ChatScreen() {
 
     if (showSettings) {
         SettingsDialog(
-            currentKey = apiKey,
-            onSave = { newKey ->
+            deepseekKey = apiKey,
+            tts = ttsSettings,
+            onSave = { newKey, newTts ->
                 apiKey = newKey
                 prefs.edit().putString(PREF_KEY, newKey).apply()
+                ttsSettings = newTts
+                saveTtsSettings(prefs, newTts)
                 showSettings = false
+            },
+            onTest = { draft ->
+                // 试听：用草稿里的参数念一句，方便当场验证有没有填错
+                if (draft.toEngineConfig().isComplete()) {
+                    tts.speak("你好呀，我是大肥鱼，语音已经接通啦", draft.toEngineConfig())
+                }
             },
             onDismiss = { showSettings = false },
         )
@@ -431,44 +535,117 @@ private fun ModelSwitchButton(modelName: String, onClick: () -> Unit) {
 }
 
 /**
- * 设置对话框：填 DeepSeek API Key，只存本机 SharedPreferences。
+ * 设置对话框：DeepSeek 对话的 Key + 豆包 TTS 的接入参数，全部只存本机 SharedPreferences。
  */
 @Composable
-private fun SettingsDialog(currentKey: String, onSave: (String) -> Unit, onDismiss: () -> Unit) {
-    var text by remember { mutableStateOf(currentKey) }
+private fun SettingsDialog(
+    deepseekKey: String,
+    tts: TtsSettings,
+    onSave: (String, TtsSettings) -> Unit,
+    onTest: (TtsSettings) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var key by remember { mutableStateOf(deepseekKey) }
+    var draft by remember { mutableStateOf(tts) }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = DeepSeaCard,
         title = {
-            Text("DeepSeek API Key", color = TextPrimary, fontSize = 17.sp)
+            Text("设置", color = TextPrimary, fontSize = 17.sp, fontWeight = FontWeight.Bold)
         },
         text = {
-            Column {
-                OutlinedTextField(
-                    value = text,
-                    onValueChange = { text = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    placeholder = { Text("sk-…", color = TextSecondary, fontSize = 14.sp) },
-                    singleLine = true,
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedTextColor = TextPrimary,
-                        unfocusedTextColor = TextPrimary,
-                        focusedBorderColor = WhaleBlue,
-                        unfocusedBorderColor = DeepSeaSoft,
-                        cursorColor = WhaleBlue,
-                    ),
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 430.dp)
+                    .verticalScroll(rememberScrollState()),
+            ) {
+                SettingsSectionTitle("DeepSeek 对话")
+                SettingsField(
+                    label = "API Key",
+                    value = key,
+                    onValueChange = { key = it },
+                    hint = "sk-…",
                 )
-                Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = "在 platform.deepseek.com 申请，只保存在本机，不会上传到任何别的地方。",
+                    text = "在 platform.deepseek.com 申请",
                     color = TextSecondary,
-                    fontSize = 12.sp,
-                    lineHeight = 16.sp,
+                    fontSize = 11.sp,
                 )
+
+                Spacer(modifier = Modifier.height(14.dp))
+                SettingsSectionTitle("豆包语音朗读（TTS）")
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("自动朗读回复", color = TextPrimary, fontSize = 14.sp)
+                    Spacer(modifier = Modifier.weight(1f))
+                    Switch(
+                        checked = draft.autoRead,
+                        onCheckedChange = { draft = draft.copy(autoRead = it) },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = DeepSea,
+                            checkedTrackColor = WhaleCyan,
+                        ),
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(6.dp))
+                SettingsField(
+                    label = "App ID",
+                    value = draft.appId,
+                    onValueChange = { draft = draft.copy(appId = it) },
+                    hint = "火山引擎控制台的应用 ID",
+                )
+                SettingsField(
+                    label = "Access Token",
+                    value = draft.token,
+                    onValueChange = { draft = draft.copy(token = it) },
+                    hint = "访问令牌",
+                )
+                SettingsField(
+                    label = "音色 ID",
+                    value = draft.speaker,
+                    onValueChange = { draft = draft.copy(speaker = it) },
+                    hint = DEFAULT_SPEAKER,
+                )
+                SettingsField(
+                    label = "资源 ID",
+                    value = draft.resourceId,
+                    onValueChange = { draft = draft.copy(resourceId = it) },
+                    hint = DEFAULT_RESOURCE_ID,
+                )
+                Text(
+                    text = "在火山引擎控制台开通语音合成后，从**同一个应用**里复制 App ID 和 Access Token" +
+                        "（跨应用混用会报 grant not found）。音色 ID 如 zh_female_cancan_mars_bigtts，" +
+                        "自己复刻的音色是 S_ 开头。资源 ID：小模型/复刻音色用 volc.megatts.default，" +
+                        "大模型用 volc.service_type.10029，2.0 用 seed-tts-2.0 —— 填错会提示 resource not granted。",
+                    color = TextSecondary,
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp,
+                )
+
+                Spacer(modifier = Modifier.height(10.dp))
+                val ttsReady = draft.toEngineConfig().isComplete()
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(onClick = { onTest(draft) }, enabled = ttsReady) {
+                        Text(
+                            text = "试听一句",
+                            color = if (ttsReady) WhaleCyan else TextSecondary,
+                            fontSize = 13.sp,
+                        )
+                    }
+                    if (!ttsReady) {
+                        Text(
+                            text = "填完 App ID / Access Token / 音色 ID 才能试听",
+                            color = TextSecondary,
+                            fontSize = 11.sp,
+                        )
+                    }
+                }
             }
         },
         confirmButton = {
-            TextButton(onClick = { onSave(text.trim()) }) {
+            TextButton(onClick = { onSave(key.trim(), draft) }) {
                 Text("保存", color = WhaleCyan, fontWeight = FontWeight.Bold)
             }
         },
@@ -478,6 +655,44 @@ private fun SettingsDialog(currentKey: String, onSave: (String) -> Unit, onDismi
             }
         },
     )
+}
+
+@Composable
+private fun SettingsSectionTitle(text: String) {
+    Text(
+        text = text,
+        color = WhaleCyan,
+        fontSize = 13.sp,
+        fontWeight = FontWeight.Bold,
+        modifier = Modifier.padding(bottom = 6.dp),
+    )
+}
+
+@Composable
+private fun SettingsField(
+    label: String,
+    value: String,
+    onValueChange: (String) -> Unit,
+    hint: String,
+) {
+    Column(modifier = Modifier.padding(bottom = 8.dp)) {
+        Text(label, color = TextSecondary, fontSize = 11.sp)
+        OutlinedTextField(
+            value = value,
+            onValueChange = onValueChange,
+            modifier = Modifier.fillMaxWidth(),
+            placeholder = { Text(hint, color = TextSecondary, fontSize = 13.sp) },
+            singleLine = true,
+            textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedTextColor = TextPrimary,
+                unfocusedTextColor = TextPrimary,
+                focusedBorderColor = WhaleBlue,
+                unfocusedBorderColor = DeepSeaSoft,
+                cursorColor = WhaleBlue,
+            ),
+        )
+    }
 }
 
 @Composable
@@ -544,7 +759,7 @@ private fun InputBar(
                 Text(
                     text = when {
                         asrLoading -> "识别中…"
-                        asrOn -> "正在听，说完再点一下电话～"
+                        asrOn -> "正在听…停 2 秒就自动识别"
                         else -> "跟大肥鱼说点什么…"
                     },
                     color = TextSecondary,
