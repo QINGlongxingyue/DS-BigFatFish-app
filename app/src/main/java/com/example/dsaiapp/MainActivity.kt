@@ -450,6 +450,9 @@ private const val PREF_SEARCH_ENABLED = "search_enabled"
 private const val PREF_SEARCH_PROVIDER = "search_provider"
 private const val PREF_SEARCH_KEY = "search_api_key"
 
+/** 🔍 联网按钮的状态要记住：上次开着，下次打开还是开着。 */
+private const val PREF_SEARCH_ARMED = "search_armed"
+
 private data class SearchSettings(
     val enabled: Boolean,
     val provider: String,
@@ -463,8 +466,9 @@ private data class SearchSettings(
 
 private fun loadSearchSettings(prefs: android.content.SharedPreferences) = SearchSettings(
     enabled = prefs.getBoolean(PREF_SEARCH_ENABLED, true),
-    provider = prefs.getString(PREF_SEARCH_PROVIDER, SearchClient.PROVIDER_TAVILY)
-        ?: SearchClient.PROVIDER_TAVILY,
+    // 默认用内置搜索：不需要任何 Key，装好就能用
+    provider = prefs.getString(PREF_SEARCH_PROVIDER, SearchClient.PROVIDER_BING)
+        ?: SearchClient.PROVIDER_BING,
     apiKey = prefs.getString(PREF_SEARCH_KEY, "") ?: "",
 )
 
@@ -540,8 +544,8 @@ private fun ChatScreen() {
     var searchSettings by remember { mutableStateOf(loadSearchSettings(prefs)) }
     var deepseekModel by remember { mutableStateOf(loadDeepSeekModel(prefs)) }
     var showCurl by remember { mutableStateOf(false) }
-    /** 手动开一次联网搜索：下一条消息先搜再问。 */
-    var forceSearch by remember { mutableStateOf(false) }
+    /** 手动开一次联网搜索：下一条消息先搜再问（状态会记住）。 */
+    var forceSearch by remember { mutableStateOf(prefs.getBoolean(PREF_SEARCH_ARMED, false)) }
     var asrSensitivity by remember {
         mutableStateOf(
             prefs.getInt(PREF_ASR_SENSITIVITY, AsrEngine.SENSITIVITY_NORMAL)
@@ -655,7 +659,8 @@ private fun ChatScreen() {
                             )
                         }
                     }
-                    forceSearch = false
+                    // ⚠️ 这里【不】把 forceSearch 清掉：联网按钮是"记住状态"的持续开关，
+                    // 开着就一直联网，再按一下才关（状态也存进了 SharedPreferences）
 
                     val history = buildList {
                         add(
@@ -679,12 +684,64 @@ private fun ChatScreen() {
                             }
                         }
                     }
-                    val result = DeepSeekClient.chat(apiKey, history, deepseekModel)
+
+                    // ---- 工具通道：只给「现成的查询工具」，模型负责给查询词 ----
+                    // 不暴露 http_get 那种原始 HTTP 工具 —— 让模型自己拼 URL/请求既不可靠也不安全，
+                    // 请求和解析都该由 App 干。deepseek-flash 不支持 function calling，
+                    // 那就不发 tools，走本地关键词判断 + 预搜索。
+                    val supportsTools = deepseekModel != DeepSeekClient.MODEL_FLASH
+                    val tools = if (supportsTools && searchSettings.isReady()) {
+                        listOf(SearchClient.toolSpec())
+                    } else {
+                        emptyList()
+                    }
+
+                    val result = if (tools.isEmpty()) {
+                        DeepSeekClient.chat(apiKey, history, deepseekModel)
+                    } else {
+                        DeepSeekClient.chatWithTools(
+                            apiKey = apiKey,
+                            history = history,
+                            model = deepseekModel,
+                            tools = tools,
+                            maxRounds = 3,
+                            toolRunner = { call ->
+                                android.util.Log.d(
+                                    "DSAI-Chat",
+                                    "工具调用 ${call.name}(${call.argumentsJson})",
+                                )
+                                when (call.name) {
+                                    // 模型只给查询词；用什么搜索服务、怎么解析都由 App 决定
+                                    "web_search" -> SearchClient.runToolCall(
+                                        call.argumentsJson,
+                                        searchSettings.toEngineConfig(),
+                                    )
+                                    else -> "未知工具：${call.name}"
+                                }
+                            },
+                        ).recoverCatching { e ->
+                            // ⚠️ 必须区分原因，别一律说"不支持工具调用"（会误导排查）
+                            val realReason = if (e is UnsupportedOperationException) {
+                                "该模型不支持工具调用"
+                            } else {
+                                "工具调用出错：${e.message}"
+                            }
+                            android.util.Log.w("DSAI-Chat", "工具路径失败（$realReason），退回普通对话")
+                            messages.add(
+                                ChatMessage(
+                                    nextId++,
+                                    "（$realReason ，这次已退回普通对话，回答里可能没有联网资料）",
+                                    fromUser = false,
+                                )
+                            )
+                            DeepSeekClient.chat(apiKey, history, deepseekModel).getOrThrow()
+                        }
+                    }
                     android.util.Log.d(
                         "DSAI-Chat",
                         "已发请求：模型=$deepseekModel，system ${history.first().content.length} 字，" +
                             "时间注入=${history.first().content.contains("现在是 ")}，" +
-                            "联网搜索=${searchBlock != null}，历史 ${history.size - 1} 条",
+                            "工具=${tools.map { it.name }}，预设搜索=${searchBlock != null}",
                     )
                     isTyping = false
                     result.onSuccess { reply ->
@@ -962,12 +1019,14 @@ private fun ChatScreen() {
             searchReady = searchSettings.isReady(),
             onSearchClick = {
                 forceSearch = !forceSearch
+                // 记住状态，下次打开 App 还是这个开关状态
+                prefs.edit().putBoolean(PREF_SEARCH_ARMED, forceSearch).apply()
                 if (forceSearch && !searchSettings.isReady()) {
                     messages.add(
                         ChatMessage(
                             nextId++,
-                            "还没配搜索服务呀～点左上角 ⚙️ →「联网搜索」填个 API Key，" +
-                                "之后我就能帮你查最新消息了 (๑•̀ㅂ•́)و",
+                            "联网搜索现在是关着的呀～去设置 →「联网搜索」打开开关，" +
+                                "内置搜索不用填 Key 就能用 (๑•̀ㅂ•́)و",
                             fromUser = false,
                         )
                     )
@@ -1009,10 +1068,6 @@ private fun ChatScreen() {
                 searchSettings = newSearch
                 saveSearchSettings(prefs, newSearch)
                 showSettings = false
-            },
-            onOpenCurl = {
-                showSettings = false
-                showCurl = true
             },
             onTest = { draft ->
                 // 试听：用草稿里的参数念一句，方便当场验证有没有填错
@@ -1633,7 +1688,6 @@ private fun SettingsDialog(
     onSave: (String, String, TtsSettings, PersonaSettings, Int, SearchSettings) -> Unit,
     onTest: (TtsSettings) -> Unit,
     onEditLive2d: () -> Unit,
-    onOpenCurl: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     var key by remember { mutableStateOf(deepseekKey) }
@@ -1702,11 +1756,9 @@ private fun SettingsDialog(
                 )
 
                 Spacer(modifier = Modifier.height(10.dp))
-                TextButton(onClick = onOpenCurl) {
-                    Text("🔧 网络调试（App 内 curl）", color = WhaleCyan, fontSize = 13.sp)
-                }
                 Text(
-                    text = "在手机上直接发 HTTP 请求看返回，用来验搜索 Key / TTS 令牌 / DeepSeek 报错",
+                    text = "想让 Ta 自己上网查资料，用这里的「联网搜索」就行；" +
+                        "搜索的请求和解析都由 App 负责，模型只负责给查询词。",
                     color = TextSecondary,
                     fontSize = 11.sp,
                     lineHeight = 15.sp,
@@ -1767,12 +1819,13 @@ private fun SettingsDialog(
                     )
                 }
                 Spacer(modifier = Modifier.height(6.dp))
-                Text("服务商", color = TextSecondary, fontSize = 11.sp)
+                Text("搜索服务", color = TextSecondary, fontSize = 11.sp)
                 Spacer(modifier = Modifier.height(4.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     listOf(
-                        SearchClient.PROVIDER_TAVILY to "Tavily",
+                        SearchClient.PROVIDER_BING to "内置(免Key)",
                         SearchClient.PROVIDER_BOCHA to "博查",
+                        SearchClient.PROVIDER_TAVILY to "Tavily",
                     ).forEach { (id, label) ->
                         val selected = searchDraft.provider == id
                         Button(
@@ -1782,36 +1835,46 @@ private fun SettingsDialog(
                                 contentColor = if (selected) DeepSea else TextSecondary,
                             ),
                             contentPadding = androidx.compose.foundation.layout.PaddingValues(
-                                horizontal = 14.dp,
+                                horizontal = 10.dp,
                                 vertical = 4.dp,
                             ),
                         ) {
                             Text(
                                 text = label,
-                                fontSize = 13.sp,
+                                fontSize = 12.sp,
                                 fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
                             )
                         }
                     }
                 }
                 Spacer(modifier = Modifier.height(6.dp))
-                SettingsField(
-                    label = "搜索 API Key",
-                    value = searchDraft.apiKey,
-                    onValueChange = { searchDraft = searchDraft.copy(apiKey = it) },
-                    hint = if (searchDraft.provider == SearchClient.PROVIDER_BOCHA) {
-                        "bochaai.com 的 API Key"
-                    } else {
-                        "tavily.com 的 API Key（tvly-…）"
-                    },
-                )
+                if (searchDraft.provider != SearchClient.PROVIDER_BING) {
+                    SettingsField(
+                        label = "搜索 API Key",
+                        value = searchDraft.apiKey,
+                        onValueChange = { searchDraft = searchDraft.copy(apiKey = it) },
+                        hint = if (searchDraft.provider == SearchClient.PROVIDER_BOCHA) {
+                            "bochaai.com 的 API Key"
+                        } else {
+                            "tavily.com 的 API Key（tvly-…）"
+                        },
+                    )
+                }
                 Text(
-                    text = "Tavily 英文资料强；博查（bochaai）中文资料强、国内可直连。" +
-                        "配好后：聊天里出现「最新 / 查一下 / 天气 / 股价」这类词会自动联网；" +
-                        "也可以点输入框左边的 🔍 手动查一次。",
+                    text = "内置搜索不用填任何 Key：App 直接解析 Bing 网页结果，" +
+                        "模型只负责给查询词，请求和解析都由 App 干（Bing 改版可能失效，" +
+                        "那时换博查/Tavily）。博查中文强、国内直连；Tavily 英文强。",
                     color = TextSecondary,
                     fontSize = 11.sp,
                     lineHeight = 15.sp,
+                )
+                Text(
+                    text = "用法：聊天里问「今天有什么新闻」她会自己判断要不要查；" +
+                        "也可以点输入框左边的 🔍 强制查一次。",
+                    color = TextSecondary,
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp,
+                    modifier = Modifier.padding(top = 4.dp),
                 )
 
                 Spacer(modifier = Modifier.height(14.dp))

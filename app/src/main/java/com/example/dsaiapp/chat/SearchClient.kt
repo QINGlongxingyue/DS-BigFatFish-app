@@ -26,6 +26,14 @@ object SearchClient {
     const val PROVIDER_TAVILY = "tavily"
     const val PROVIDER_BOCHA = "bocha"
 
+    /**
+     * 内置搜索：直接解析 cn.bing.com 的网页结果，**不需要任何 Key**。
+     *
+     * <p>模型只负责给查询词，怎么请求、怎么解析都由 App 干 —— 这也是默认档，
+     * 让"联网搜索"开箱即用。缺点是解析网页，Bing 改版可能失效（那时换 Tavily/博查）。
+     */
+    const val PROVIDER_BING = "bing"
+
     /** 一条搜索结果。 */
     data class Item(val title: String, val snippet: String, val url: String)
 
@@ -35,10 +43,13 @@ object SearchClient {
         val provider: String,
         val apiKey: String,
     ) {
-        fun isReady(): Boolean = enabled && apiKey.isNotBlank()
+        /** 内置搜索不需要 Key，所以只看开关。 */
+        fun isReady(): Boolean = enabled &&
+            (provider == PROVIDER_BING || apiKey.isNotBlank())
 
         fun providerName(): String = when (provider) {
             PROVIDER_BOCHA -> "博查"
+            PROVIDER_BING -> "内置搜索"
             else -> "Tavily"
         }
     }
@@ -58,6 +69,7 @@ object SearchClient {
     fun search(query: String, config: Config, max: Int = 5): Result<List<Item>> = try {
         val items = when (config.provider) {
             PROVIDER_BOCHA -> searchBocha(query, config.apiKey, max)
+            PROVIDER_BING -> searchBing(query, max)
             else -> searchTavily(query, config.apiKey, max)
         }
         Log.d(TAG, "搜索「$query」-> ${items.size} 条结果（${config.providerName()}）")
@@ -66,6 +78,71 @@ object SearchClient {
         Log.e(TAG, "搜索失败", t)
         Result.failure(t)
     }
+
+    // ------------------------------------------------------------------
+    // 内置搜索（免 Key）：GET cn.bing.com 的网页结果，正则抠出标题/链接/摘要
+    // ------------------------------------------------------------------
+    private fun searchBing(query: String, max: Int): List<Item> {
+        val encoded = java.net.URLEncoder.encode(query, "UTF-8")
+        val url = "https://cn.bing.com/search?q=$encoded&setlang=zh-CN&ensearch=0"
+
+        val req = Request.Builder()
+            .url(url)
+            .header(
+                "User-Agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+                    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            )
+            .header("Accept-Language", "zh-CN,zh;q=0.9")
+            .get()
+            .build()
+
+        val html = http.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) error("Bing HTTP ${resp.code}")
+            resp.body?.string().orEmpty()
+        }
+
+        // 结果块形如：<li class="b_algo"> … <h2><a href="…">标题</a></h2> … <p>摘要</p> …</li>
+        val blockRe = Regex("<li class=\"b_algo\".*?</li>", RegexOption.DOT_MATCHES_ALL)
+        val linkRe = Regex(
+            "<h2[^>]*>\\s*<a[^>]*href=\"([^\"]+)\"[^>]*>(.*?)</a>",
+            RegexOption.DOT_MATCHES_ALL,
+        )
+        val snippetRe = Regex("<p[^>]*>(.*?)</p>", RegexOption.DOT_MATCHES_ALL)
+
+        val items = ArrayList<Item>()
+        for (block in blockRe.findAll(html)) {
+            val text = block.value
+            val link = linkRe.find(text) ?: continue
+            val href = link.groupValues[1]
+            if (!href.startsWith("http")) continue
+            items.add(
+                Item(
+                    title = stripTags(link.groupValues[2]),
+                    snippet = snippetRe.find(text)?.groupValues?.get(1)?.let { stripTags(it) } ?: "",
+                    url = href,
+                ),
+            )
+            if (items.size >= max) break
+        }
+        if (items.isEmpty()) {
+            // 没抠到结果多半是页面结构变了，别让上层以为是"查到了但没有内容"
+            error("内置搜索没解析出结果（Bing 页面结构可能变了），可以改用 Tavily/博查")
+        }
+        return items
+    }
+
+    /** 去 HTML 标签与常见实体。 */
+    private fun stripTags(s: String): String = s
+        .replace(Regex("<[^>]+>"), "")
+        .replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&nbsp;", " ")
+        .replace(Regex("\\s+"), " ")
+        .trim()
 
     // ------------------------------------------------------------------
     // Tavily: POST https://api.tavily.com/search
@@ -154,6 +231,48 @@ object SearchClient {
         sb.append("\n请依据以上资料回答用户，可以用【1】【2】这样的编号标注来源；")
         sb.append("资料里没有的信息就说没查到，不要自己编。")
         return sb.toString()
+    }
+
+    /**
+     * 给「智能体」用的工具定义：模型自己决定要不要搜。
+     */
+    fun toolSpec(): DeepSeekClient.ToolSpec = DeepSeekClient.ToolSpec(
+        name = "web_search",
+        description = "联网搜索，用来查最新的、你不确定的信息（新闻、天气、价格、赛事、" +
+            "某个人的近况等）。需要时效性或事实性资料时主动调用它，不要凭记忆编造。",
+        parameters = JSONObject()
+            .put("type", "object")
+            .put(
+                "properties",
+                JSONObject().put(
+                    "query",
+                    JSONObject()
+                        .put("type", "string")
+                        .put("description", "搜索关键词，尽量具体，例如「北京今天天气」"),
+                ),
+            )
+            .put("required", org.json.JSONArray().put("query")),
+    )
+
+    /**
+     * 执行模型发起的 web_search 调用，返回给模型看的文本。
+     */
+    fun runToolCall(argumentsJson: String, config: Config, max: Int = 5): String {
+        val query = runCatching {
+            val o = JSONObject(argumentsJson)
+            o.optString("query").ifBlank { o.optString("q") }
+        }.getOrDefault("").trim()
+
+        if (query.isEmpty()) return "搜索失败：没有给出 query 参数。"
+        if (!config.isReady()) {
+            return "搜索不可用：用户还没在设置里配置搜索服务的 API Key，" +
+                "请直接告诉用户去设置里填一下，不要编造结果。"
+        }
+
+        return search(query, config, max).fold(
+            onSuccess = { formatForPrompt(query, it, config.providerName()) },
+            onFailure = { "搜索失败：${it.message}。请如实告诉用户这次没查成。" },
+        )
     }
 
     /**
