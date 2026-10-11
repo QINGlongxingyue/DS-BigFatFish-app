@@ -1,0 +1,42 @@
+# 从 gitcode 镜像同步到本仓库（GitHub）
+#
+# 为什么这样做：本机在国内校园网，github.com 不可达，推不上去；
+# 而 GitHub 的 runner 能直连 gitcode —— 所以让 GitHub 自己去拉。
+#
+# 用法：Actions 页面选「从 gitcode 镜像同步」→ Run workflow（也可以等每天自动跑一次）
+#
+# 注：workflow_dispatch 支持手动触发；schedule 用 UTC，20:00 UTC = 北京时间 04:00
+
+name: 从 gitcode 镜像同步
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 20 * * *'
+
+permissions:
+  contents: write
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 从 gitcode 拉取完整仓库
+        run: |
+          set -e
+          git clone --bare https://gitcode.com/Abc133123/DS-BigFatFish-app.git src.git
+          cd src.git
+          echo "拉到 $(git rev-list --count --all) 个提交，HEAD=$(git rev-parse HEAD)"
+
+      - name: 推送到本仓库（保留分支与 tag）
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -e
+          cd src.git
+          git push --force \
+            "https://x-access-token:${TOKEN}@github.com/${REPO}.git" \
+            'refs/heads/*:refs/heads/*' \
+            'refs/tags/*:refs/tags/*'
+          echo "同步完成：https://github.com/${REPO}"
