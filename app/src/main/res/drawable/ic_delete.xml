@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 删除图标（垃圾桶），描边风格，和 ic_chat_history 一致 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+
+    <!-- 盖子 -->
+    <path
+        android:pathData="M4,6.5 h16"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="1.7"
+        android:strokeLineCap="round" />
+
+    <!-- 提手 -->
+    <path
+        android:pathData="M9.5,6.5 v-2 a1,1 0 0 1 1,-1 h3 a1,1 0 0 1 1,1 v2"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="1.5"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+
+    <!-- 桶身 -->
+    <path
+        android:pathData="M6.5,6.5 l1,12.5 a1.5,1.5 0 0 0 1.5,1.4 h6 a1.5,1.5 0 0 0 1.5,-1.4 l1,-12.5"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="1.6"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+
+    <!-- 两条竖线 -->
+    <path
+        android:pathData="M10.5,10.5 v6 M13.5,10.5 v6"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="1.4"
+        android:strokeLineCap="round" />
+</vector>

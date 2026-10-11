@@ -41,8 +41,45 @@ class AsrEngine(private val context: Context) {
          */
         private const val SILENCE_MS = 2500
 
-        /** RMS 低于这个值算「没声音」。安静环境约 0.005，底噪大的环境要调高。 */
+        /** RMS 低于这个值算「没声音」。 */
         private const val SILENCE_RMS = 0.012
+
+        /**
+         * 动态范围下限：整段的**峰值**至少要是**平均值**的这么多倍。
+         *
+         * <p>只靠音量高低分不开"稳态底噪"和"人说话"：风扇/空调的电平又稳又平，
+         * 峰值≈平均值；人说话有音节起伏和换气停顿，峰值往往是平均值的 3~10 倍。
+         * 有了这一条，音量门槛就能压得比较低（小声说话也能过），而不怕底噪混进来。
+         */
+        private const val MIN_DYNAMIC_RANGE = 2.0
+
+        /** 超过这么久的长录音不做动态范围判断（可能是连续说了很久）。 */
+        private const val DYNAMIC_RANGE_MAX_MS = 20_000L
+
+        /**
+         * 说话判定的音量门槛，按灵敏度分档。
+         *
+         * <p>⚠️ 注意：**判"有声音"和判"说话时长"必须用同一个门槛**。
+         * 早先前者用 0.012、后者用 0.025，于是音量落在中间的人（手机麦克风增益低时很常见）
+         * 会陷入"静音计时被不断重置 → 永远不断句 → 到 60 秒上限 → 整段当噪音丢掉"，
+         * 表现就是"正常说话却毫无反应"。
+         *
+         * <p>对着手机正常说话的 RMS 大致 0.02~0.25；笔记本风扇/空调底噪常在 0.005~0.03。
+         * 所以留了三档给用户按自己设备选。
+         */
+        private val SPEECH_RMS_BY_LEVEL = floatArrayOf(
+            0.006f, // 灵敏：小声说话 / 麦克风增益低
+            0.012f, // 标准
+            0.030f, // 抗噪：环境吵（风扇、空调、街边）
+        )
+
+        /** 灵敏度档位：0=灵敏 1=标准 2=抗噪。 */
+        const val SENSITIVITY_SENSITIVE = 0
+        const val SENSITIVITY_NORMAL = 1
+        const val SENSITIVITY_NOISY = 2
+
+        /** 一段话里至少要有这么久超过门槛，否则整段当噪音丢掉（短促的"嗯/好"也能过）。 */
+        private const val MIN_VOICE_MS = 180L
 
         /** 至少录到这么久才允许被静音判定结束，免得刚按下就立刻收尾。 */
         private const val MIN_RECORD_MS = 600
@@ -63,6 +100,14 @@ class AsrEngine(private val context: Context) {
     /** 识别结果为空（没听清）。电话模式下这不算错误，接着听就行。 */
     var onEmpty: (() -> Unit)? = null
 
+    /** 灵敏度档位（0=灵敏 1=标准 2=抗噪），由设置界面写入。 */
+    @Volatile
+    var sensitivity: Int = SENSITIVITY_NORMAL
+
+    /** 当前生效的说话门槛。 */
+    private fun speechRms(): Double =
+        SPEECH_RMS_BY_LEVEL[sensitivity.coerceIn(0, SPEECH_RMS_BY_LEVEL.size - 1)].toDouble()
+
     private var recognizer: OfflineRecognizer? = null
     private var recorder: AudioRecord? = null
     private var worker: Thread? = null
@@ -70,6 +115,17 @@ class AsrEngine(private val context: Context) {
     /** 录音分块累积（解码时拼起来）。 */
     private val chunks = ArrayList<FloatArray>()
     private var sampleCount = 0
+
+    /** 当前这段录音里，电平超过「说话下限」的累计时长（毫秒）。 */
+    @Volatile
+    private var voicedMs = 0L
+
+    /** 当前这段录音的电平峰值（用来给用户调阈值：风扇底噪到底多响）。 */
+    @Volatile
+    private var peakRms = 0.0
+
+    /** 当前这段录音的平方和（算整段平均值用，配合峰值判动态范围）。 */
+    private var sumSquares = 0.0
 
     @Volatile
     private var running = false
@@ -156,8 +212,7 @@ class AsrEngine(private val context: Context) {
             return
         }
 
-        chunks.clear()
-        sampleCount = 0
+        resetBuffers()
         recorder = rec
         running = true
         isRecording = true
@@ -194,9 +249,38 @@ class AsrEngine(private val context: Context) {
         // 攒到的音频拼成一整段
         val total = sampleCount
         if (total <= 0) {
-            post { onError?.invoke("没录到声音呀，再试一次～") }
+            resetBuffers()
+            post { onEmpty?.invoke() }
             return
         }
+
+        // 音量门槛：整段里"像人说话"的时间太短，直接当噪音丢掉，既省算力也不会发出去。
+        // （风扇、空调、键盘这类底噪会被 Paraformer 幻觉成中文，必须在这里挡住）
+        val voiced = voicedMs
+        val gate = speechRms()
+        val totalMs = total * 1000L / SAMPLE_RATE
+        val avgRms = sqrt(sumSquares / total) / 32768.0
+        val dynamicRange = if (avgRms > 1e-6) peakRms / avgRms else 0.0
+        // 长时间连续录音（比如一口气说半分钟）不做动态范围判断，避免误伤
+        val dynamicOk = totalMs > DYNAMIC_RANGE_MAX_MS || dynamicRange >= MIN_DYNAMIC_RANGE
+
+        if (voiced < MIN_VOICE_MS || !dynamicOk) {
+            Log.d(
+                TAG,
+                "当噪音丢掉：说话累计 ${voiced}ms（下限 $MIN_VOICE_MS），" +
+                    "峰值 ${"%.4f".format(peakRms)} / 平均 ${"%.4f".format(avgRms)} " +
+                    "= 动态 ${"%.2f".format(dynamicRange)}（下限 $MIN_DYNAMIC_RANGE），门槛 ${"%.4f".format(gate)}",
+            )
+            resetBuffers()
+            post { onEmpty?.invoke() }
+            return
+        }
+        Log.d(
+            TAG,
+            "判定有人在说话：累计 ${voiced}ms，峰值 ${"%.4f".format(peakRms)}，" +
+                "动态 ${"%.2f".format(dynamicRange)}，门槛 ${"%.4f".format(gate)}",
+        )
+
         val samples = FloatArray(total)
         var offset = 0
         for (c in chunks) {
@@ -205,12 +289,20 @@ class AsrEngine(private val context: Context) {
             System.arraycopy(c, 0, samples, offset, n)
             offset += n
         }
-        chunks.clear()
-        sampleCount = 0
+        resetBuffers()
 
-        Log.d(TAG, "停止录音，共 ${total / SAMPLE_RATE.toFloat()} 秒，开始解码")
+        Log.d(TAG, "停止录音，共 ${total / SAMPLE_RATE.toFloat()} 秒（说话 $voiced ms），开始解码")
 
         Thread({ decode(samples) }, "dsai-asr-dec").start()
+    }
+
+    /** 清掉当前这段录音的缓冲。 */
+    private fun resetBuffers() {
+        chunks.clear()
+        sampleCount = 0
+        voicedMs = 0
+        peakRms = 0.0
+        sumSquares = 0.0
     }
 
     /** 丢掉当前录音，不解码。 */
@@ -271,25 +363,34 @@ class AsrEngine(private val context: Context) {
             }
             chunks.add(block)
             sampleCount += n
+            sumSquares += sum
 
             val rms = sqrt(sum / n) / 32768.0
             val level = (rms * 12).coerceIn(0.0, 1.0).toFloat()
             post { onLevel?.invoke(level) }
 
-            // ---- 电话式断句：连续静音 2 秒 = 这句说完了 ----
+            // ---- 单一门槛同时决定「有没有在说」和「说了多久」----
+            // 用两个不同阈值会让中间那段音量永远不断句、最后又被丢掉（见 SPEECH_RMS_BY_LEVEL 注释）
+            val gate = speechRms()
             val blockMs = n * 1000L / SAMPLE_RATE
-            if (rms > SILENCE_RMS) {
+            if (rms > gate) {
                 if (!speechDetected) {
                     speechDetected = true
-                    Log.d(TAG, "检测到说话")
+                    Log.d(TAG, "检测到说话（RMS ${"%.4f".format(rms)} > 门槛 ${"%.4f".format(gate)}）")
                 }
                 silenceMs = 0
+                voicedMs += blockMs
             } else {
                 silenceMs += blockMs
             }
+            if (rms > peakRms) peakRms = rms
 
             if (silenceMs >= SILENCE_MS && sampleCount >= minSamples) {
-                Log.d(TAG, "静音 ${silenceMs}ms（说了话=$speechDetected），自动结束这一句")
+                Log.d(
+                    TAG,
+                    "静音 ${silenceMs}ms（有说话=$speechDetected，说话累计 ${voicedMs}ms，" +
+                        "峰值 ${"%.4f".format(peakRms)} / 门槛 ${"%.4f".format(gate)}），自动结束这一句",
+                )
                 post { onAutoStop?.invoke() }
                 break
             }

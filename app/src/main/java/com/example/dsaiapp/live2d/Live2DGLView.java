@@ -24,6 +24,18 @@ public class Live2DGLView extends GLSurfaceView {
     private OnModelTouchListener touchListener;
     private final Live2DRenderer renderer = new Live2DRenderer();
 
+    /**
+     * 编辑模式：拖动=移动模型，双指捏合=缩放。
+     * 打开时不做视线跟随（否则一拖眼睛就乱瞟）。
+     */
+    private volatile boolean editMode = false;
+
+    /** 单指拖拽的上一次位置 / 双指的上一次间距。切手指数时必须重置，否则会跳一下。 */
+    private float lastX;
+    private float lastY;
+    private float lastSpan;
+    private boolean dragging;
+
     public Live2DGLView(Context context) {
         this(context, null);
     }
@@ -43,8 +55,35 @@ public class Live2DGLView extends GLSurfaceView {
         this.touchListener = listener;
     }
 
+    /** 切换编辑模式（主线程/Binder 都行，只写一个 volatile 标志）。 */
+    public void setEditMode(boolean on) {
+        this.editMode = on;
+        this.dragging = false;
+        this.lastSpan = 0f;
+        if (on) {
+            final Live2DModel model = Live2DDelegate.getInstance().getModel();
+            if (model != null) model.setLook(0f, 0f);
+        }
+    }
+
+    public boolean isEditMode() {
+        return editMode;
+    }
+
+    /** 两指之间的距离。 */
+    private static float span(MotionEvent e) {
+        if (e.getPointerCount() < 2) return 0f;
+        final float dx = e.getX(0) - e.getX(1);
+        final float dy = e.getY(0) - e.getY(1);
+        return (float) Math.sqrt(dx * dx + dy * dy);
+    }
+
     @Override
     public boolean onTouchEvent(MotionEvent event) {
+        if (editMode) {
+            return handleEditTouch(event);
+        }
+
         final Live2DModel model = Live2DDelegate.getInstance().getModel();
         if (model == null || !model.isLoaded()) {
             return super.onTouchEvent(event);
@@ -68,6 +107,74 @@ public class Live2DGLView extends GLSurfaceView {
                 return true;
             default:
                 return super.onTouchEvent(event);
+        }
+    }
+
+    /**
+     * 编辑模式下的手势：
+     * - 单指拖动 → 移动（像素换算成 NDC：整屏宽 = 2）
+     * - 双指捏合 → 缩放（用两指间距的比例）
+     *
+     * <p>手指数变化的那一帧只重置基准、不做位移，避免"抬起一根手指模型跳一下"。
+     */
+    private boolean handleEditTouch(MotionEvent event) {
+        final Live2DDelegate delegate = Live2DDelegate.getInstance();
+        final int w = Math.max(1, getWidth());
+        final int h = Math.max(1, getHeight());
+
+        switch (event.getActionMasked()) {
+            case MotionEvent.ACTION_DOWN:
+                lastX = event.getX();
+                lastY = event.getY();
+                dragging = true;
+                lastSpan = 0f;
+                return true;
+
+            case MotionEvent.ACTION_POINTER_DOWN:
+                // 第二根手指落下：记录基准间距，暂停单指拖拽
+                if (event.getPointerCount() >= 2) {
+                    lastSpan = span(event);
+                    dragging = false;
+                }
+                return true;
+
+            case MotionEvent.ACTION_MOVE:
+                if (event.getPointerCount() >= 2) {
+                    final float s = span(event);
+                    if (lastSpan > 1f && s > 1f) {
+                        delegate.scaleViewBy(s / lastSpan);
+                    }
+                    lastSpan = s;
+                    // 双指期间不做平移：取中点容易和"缩放"的感觉打架
+                } else if (dragging) {
+                    final float dx = event.getX() - lastX;
+                    final float dy = event.getY() - lastY;
+                    // 屏幕 Y 向下，NDC 的 Y 向上，所以 dy 取负
+                    delegate.moveViewBy(dx / w * 2f, -dy / h * 2f);
+                    lastX = event.getX();
+                    lastY = event.getY();
+                }
+                return true;
+
+            case MotionEvent.ACTION_POINTER_UP:
+                // 抬起一根手指：重置基准，剩下的手指从"当前"位置继续，不会跳
+                lastSpan = 0f;
+                final int remain = event.getActionIndex() == 0 ? 1 : 0;
+                if (event.getPointerCount() > remain) {
+                    lastX = event.getX(remain);
+                    lastY = event.getY(remain);
+                    dragging = true;
+                }
+                return true;
+
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_CANCEL:
+                dragging = false;
+                lastSpan = 0f;
+                return true;
+
+            default:
+                return true;
         }
     }
 

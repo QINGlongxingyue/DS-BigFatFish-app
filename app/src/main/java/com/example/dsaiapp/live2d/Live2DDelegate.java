@@ -85,6 +85,21 @@ public final class Live2DDelegate {
     /** 逻辑视窗比例：决定模型在屏幕上占多大、怎么裁。 */
     private float viewScale = 1.0f;
 
+    /** 模型在画面里的平移（NDC 单位：±1 = 半个屏幕宽/高）。volatile：UI 线程改，GL 线程读。 */
+    private volatile float viewOffsetX = 0f;
+    private volatile float viewOffsetY = 0f;
+
+    /** 用户手调过的变换（位置+大小），按模型下标记住，加载模型时优先用它。 */
+    private final float[] userScale = new float[MODELS.length];
+    private final float[] userOffsetX = new float[MODELS.length];
+    private final float[] userOffsetY = new float[MODELS.length];
+    private final boolean[] userTransformSet = new boolean[MODELS.length];
+
+    /** 缩放/平移的合理范围，防止手滑把模型拖没影或者缩成一个点。 */
+    public static final float MIN_USER_SCALE = 0.25f;
+    public static final float MAX_USER_SCALE = 3.0f;
+    public static final float MAX_ABS_OFFSET = 1.2f;
+
     /** 标记模型是否已经尝试过初始化，避免每帧重复尝试。 */
     private boolean modelInitAttempted = false;
 
@@ -114,6 +129,15 @@ public final class Live2DDelegate {
         return MODELS[currentModelIndex].name;
     }
 
+    /** 所有模型名（UI 用来遍历推/存各自的变换）。 */
+    public String[] getModelNames() {
+        final String[] names = new String[MODELS.length];
+        for (int i = 0; i < MODELS.length; i++) {
+            names[i] = MODELS[i].name;
+        }
+        return names;
+    }
+
     /** 切到下一个模型（GL 线程调用）。 */
     public void switchToNextModel() {
         // 先释放旧的
@@ -133,6 +157,93 @@ public final class Live2DDelegate {
     /** 调整模型在画面里的整体缩放（1.0 为默认）。 */
     public void setViewScale(float scale) {
         viewScale = scale <= 0.05f ? 0.05f : scale;
+    }
+
+    public float getViewScale() {
+        return viewScale;
+    }
+
+    public float getViewOffsetX() {
+        return viewOffsetX;
+    }
+
+    public float getViewOffsetY() {
+        return viewOffsetY;
+    }
+
+    /**
+     * 拖动模型：参数是 NDC 位移（±1 = 半个屏幕）。
+     * 直接累加并夹在合理范围内，越界也不会把模型弄丢。
+     */
+    public void moveViewBy(float dx, float dy) {
+        viewOffsetX = clamp(viewOffsetX + dx, -MAX_ABS_OFFSET, MAX_ABS_OFFSET);
+        viewOffsetY = clamp(viewOffsetY + dy, -MAX_ABS_OFFSET, MAX_ABS_OFFSET);
+    }
+
+    /** 双指缩放：在当前大小上乘一个系数。 */
+    public void scaleViewBy(float factor) {
+        if (factor <= 0f || Float.isNaN(factor) || Float.isInfinite(factor)) return;
+        viewScale = clamp(viewScale * factor, MIN_USER_SCALE, MAX_USER_SCALE);
+    }
+
+    /** 把当前的位置/大小记为「用户手调的」，并记住属于当前模型。 */
+    public void rememberUserTransform() {
+        final int i = currentModelIndex;
+        userScale[i] = viewScale;
+        userOffsetX[i] = viewOffsetX;
+        userOffsetY[i] = viewOffsetY;
+        userTransformSet[i] = true;
+    }
+
+    /** 恢复当前模型的默认位置/大小（不改变"是否手调过"的记录）。 */
+    public void resetToDefaultTransform() {
+        viewScale = MODELS[currentModelIndex].viewScale;
+        viewOffsetX = 0f;
+        viewOffsetY = 0f;
+    }
+
+    /**
+     * 由 UI 层把本地存好的变换推给某个模型（按模型名匹配）。
+     *
+     * <p>如果推的正好是当前模型，立刻生效；否则先存着，等切过去加载时用。
+     */
+    public void setUserTransformFor(String modelName, float scale, float ox, float oy) {
+        for (int i = 0; i < MODELS.length; i++) {
+            if (!MODELS[i].name.equals(modelName)) continue;
+            userScale[i] = clamp(scale, MIN_USER_SCALE, MAX_USER_SCALE);
+            userOffsetX[i] = clamp(ox, -MAX_ABS_OFFSET, MAX_ABS_OFFSET);
+            userOffsetY[i] = clamp(oy, -MAX_ABS_OFFSET, MAX_ABS_OFFSET);
+            userTransformSet[i] = true;
+            if (i == currentModelIndex) {
+                viewScale = userScale[i];
+                viewOffsetX = userOffsetX[i];
+                viewOffsetY = userOffsetY[i];
+            }
+            return;
+        }
+    }
+
+    /** 当前模型的变换（scale, offX, offY），给 UI 存盘用。 */
+    public float[] getCurrentTransform() {
+        return new float[]{viewScale, viewOffsetX, viewOffsetY};
+    }
+
+    /** 加载模型后决定用谁的大小：手调过就用手调的，否则用模型自带的默认值。 */
+    private void applyDefaultOrUserTransform(Live2DModel.ModelDef def) {
+        final int i = currentModelIndex;
+        if (userTransformSet[i]) {
+            viewScale = userScale[i];
+            viewOffsetX = userOffsetX[i];
+            viewOffsetY = userOffsetY[i];
+        } else {
+            viewScale = def.viewScale;
+            viewOffsetX = 0f;
+            viewOffsetY = 0f;
+        }
+    }
+
+    private static float clamp(float v, float lo, float hi) {
+        return v < lo ? lo : (v > hi ? hi : v);
     }
 
     // ------------------------------------------------------------------
@@ -195,7 +306,7 @@ public final class Live2DDelegate {
         }
 
         model.setupTextures();
-        setViewScale(def.viewScale);
+        applyDefaultOrUserTransform(def);
         return true;
     }
 
@@ -259,6 +370,8 @@ public final class Live2DDelegate {
         m[0] = scale / halfWidth;   // X 缩放
         m[5] = scale / halfHeight;  // Y 缩放
         m[10] = -1f;                // Z 压平
+        m[12] = viewOffsetX;        // X 平移（NDC）
+        m[13] = viewOffsetY;        // Y 平移（NDC）
         m[15] = 1f;                 // W
         projection.setMatrix(m);
         return projection;

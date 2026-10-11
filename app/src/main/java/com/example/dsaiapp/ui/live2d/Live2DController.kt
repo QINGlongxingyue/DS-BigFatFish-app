@@ -60,6 +60,42 @@ object Live2DController {
         Live2DDelegate.getInstance().setViewScale(scale)
     }
 
+    // ------------------------------------------------------------------
+    // 位置 / 大小编辑
+    // ------------------------------------------------------------------
+
+    /** 开关编辑模式：拖拽移动、双指缩放。 */
+    fun setEditMode(on: Boolean) {
+        glView?.setEditMode(on)
+    }
+
+    /** 打出当前的变换，方便日志里确认手调有没有生效。 */
+    fun logTransform(tag: String) {
+        val tf = currentTransform()
+        android.util.Log.d(
+            "DSAI-Live2D",
+            "$tag scale=${tf[0]} offsetX=${tf[1]} offsetY=${tf[2]}",
+        )
+    }
+
+    /** 把本地存的变换推给某个模型（切模型、启动时用）。 */
+    fun setUserTransformFor(modelName: String, scale: Float, offsetX: Float, offsetY: Float) = onGl {
+        Live2DDelegate.getInstance().setUserTransformFor(modelName, scale, offsetX, offsetY)
+    }
+
+    /** 记住当前模型手调的位置/大小（编辑完成时调）。 */
+    fun rememberTransform() = onGl {
+        Live2DDelegate.getInstance().rememberUserTransform()
+    }
+
+    /** 恢复当前模型的默认位置/大小。 */
+    fun resetTransform() = onGl {
+        Live2DDelegate.getInstance().resetToDefaultTransform()
+    }
+
+    /** 读当前模型的变换 [scale, offsetX, offsetY]（主线程直接读 volatile 值）。 */
+    fun currentTransform(): FloatArray = Live2DDelegate.getInstance().currentTransform
+
     fun setLook(x: Float, y: Float) = onGl {
         Live2DDelegate.getInstance().model?.setLook(x, y)
     }
@@ -68,6 +104,9 @@ object Live2DController {
 
     /** 当前模型名（主线程直接读）。 */
     fun currentModelName(): String = Live2DDelegate.getInstance().currentModelName
+
+    /** 所有模型名。 */
+    fun allModelNames(): List<String> = Live2DDelegate.getInstance().modelNames.toList()
 
     /**
      * 切到下一个模型。

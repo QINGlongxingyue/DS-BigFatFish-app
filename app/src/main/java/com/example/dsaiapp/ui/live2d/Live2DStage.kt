@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -25,11 +26,17 @@ import com.example.dsaiapp.live2d.Live2DGLView
 fun Live2DStage(
     modifier: Modifier = Modifier,
     backgroundColor: Color = Color.Transparent,
+    editMode: Boolean = false,
     onReady: (Live2DGLView) -> Unit = {},
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val glView = remember { Live2DGLView(context) }
+
+    // 编辑模式开关同步到 GL 视图（拖拽/缩放的触摸逻辑在视图里）
+    LaunchedEffect(editMode) {
+        glView.setEditMode(editMode)
+    }
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
