@@ -41,6 +41,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Phone
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -79,7 +80,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.dsaiapp.asr.AsrEngine
 import com.example.dsaiapp.chat.DeepSeekClient
+import com.example.dsaiapp.chat.HttpProbe
 import com.example.dsaiapp.chat.ModelReactions
+import com.example.dsaiapp.chat.SearchClient
 import com.example.dsaiapp.tts.TtsEngine
 import com.example.dsaiapp.ui.live2d.Live2DController
 import com.example.dsaiapp.ui.live2d.Live2DStage
@@ -241,18 +244,33 @@ private fun saveTtsSettings(prefs: android.content.SharedPreferences, s: TtsSett
 private const val PREF_SYSTEM_PROMPT = "system_prompt"
 private const val PREF_MEMORY_DOC = "memory_doc"
 
+/** 当前时间上下文：模型自己不知道"现在"，每次请求都现算一份塞进 system。 */
+private fun currentTimeContext(): String {
+    val now = java.util.Date()
+    val date = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault()).format(now)
+    val time = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(now)
+    val week = java.text.SimpleDateFormat("EEEE", java.util.Locale.CHINA).format(now)
+    val zone = java.util.TimeZone.getDefault().getDisplayName(false, java.util.TimeZone.SHORT)
+    return "现在是 $date（$week）$time，$zone（用户手机的本地时间）。" +
+        "回答任何和日期、时间、星期、「今天/明天/昨天」有关的问题时，一律以这个时间为准。"
+}
+
 private data class PersonaSettings(
     /** 空 = 用内置默认提示词。 */
     val systemPrompt: String,
     /** 辅助记忆：一段自由文本，会作为背景资料一起发给模型。 */
     val memoryDoc: String,
 ) {
-    /** 实际发给模型的 system 内容：人设 + （有的话）结构化的长期记忆。 */
+    /** 实际发给模型的 system 内容：人设 + 当前时间 +（有的话）结构化的长期记忆。 */
     fun effectivePrompt(): String {
         val base = systemPrompt.ifBlank { SYSTEM_PROMPT }
+        val sb = StringBuilder(base)
+        sb.append("\n\n# 当前时间\n").append(currentTimeContext())
         val memory = memoryDoc.trim()
-        if (memory.isEmpty()) return base
-        return base + "\n\n" + String.format(MEMORY_TEMPLATE, memory)
+        if (memory.isNotEmpty()) {
+            sb.append("\n\n").append(String.format(MEMORY_TEMPLATE, memory))
+        }
+        return sb.toString()
     }
 
     fun isDefault(): Boolean = systemPrompt.isBlank()
@@ -405,6 +423,60 @@ private fun deleteChatSession(
 }
 
 // ---------------------------------------------------------------------------
+// DeepSeek 模型选择
+// ---------------------------------------------------------------------------
+
+private const val PREF_DEEPSEEK_MODEL = "deepseek_model"
+
+private val MODEL_LABELS = listOf(
+    DeepSeekClient.MODEL_CHAT to "标准",
+    DeepSeekClient.MODEL_REASONER to "深度思考",
+    DeepSeekClient.MODEL_FLASH to "快速",
+)
+private val MODEL_HINTS = listOf(
+    "deepseek-chat：日常对话的标准模型，速度与质量均衡",
+    "deepseek-reasoner：会先推理再回答，更聪明但慢一些（等十几秒正常）",
+    "deepseek-flash：最快，回答偏简短",
+)
+
+private fun loadDeepSeekModel(prefs: android.content.SharedPreferences): String =
+    prefs.getString(PREF_DEEPSEEK_MODEL, DeepSeekClient.MODEL_CHAT) ?: DeepSeekClient.MODEL_CHAT
+
+// ---------------------------------------------------------------------------
+// 联网搜索设置
+// ---------------------------------------------------------------------------
+
+private const val PREF_SEARCH_ENABLED = "search_enabled"
+private const val PREF_SEARCH_PROVIDER = "search_provider"
+private const val PREF_SEARCH_KEY = "search_api_key"
+
+private data class SearchSettings(
+    val enabled: Boolean,
+    val provider: String,
+    val apiKey: String,
+) {
+    fun toEngineConfig() = SearchClient.Config(enabled, provider, apiKey)
+
+    /** 配好了没有（没配就只能普通聊天，不能联网）。 */
+    fun isReady(): Boolean = toEngineConfig().isReady()
+}
+
+private fun loadSearchSettings(prefs: android.content.SharedPreferences) = SearchSettings(
+    enabled = prefs.getBoolean(PREF_SEARCH_ENABLED, true),
+    provider = prefs.getString(PREF_SEARCH_PROVIDER, SearchClient.PROVIDER_TAVILY)
+        ?: SearchClient.PROVIDER_TAVILY,
+    apiKey = prefs.getString(PREF_SEARCH_KEY, "") ?: "",
+)
+
+private fun saveSearchSettings(prefs: android.content.SharedPreferences, s: SearchSettings) {
+    prefs.edit()
+        .putBoolean(PREF_SEARCH_ENABLED, s.enabled)
+        .putString(PREF_SEARCH_PROVIDER, s.provider)
+        .putString(PREF_SEARCH_KEY, s.apiKey)
+        .apply()
+}
+
+// ---------------------------------------------------------------------------
 // 语音输入灵敏度
 // ---------------------------------------------------------------------------
 
@@ -465,6 +537,11 @@ private fun ChatScreen() {
     var apiKey by remember { mutableStateOf(prefs.getString(PREF_KEY, "") ?: "") }
     var ttsSettings by remember { mutableStateOf(loadTtsSettings(prefs)) }
     var persona by remember { mutableStateOf(loadPersonaSettings(prefs)) }
+    var searchSettings by remember { mutableStateOf(loadSearchSettings(prefs)) }
+    var deepseekModel by remember { mutableStateOf(loadDeepSeekModel(prefs)) }
+    var showCurl by remember { mutableStateOf(false) }
+    /** 手动开一次联网搜索：下一条消息先搜再问。 */
+    var forceSearch by remember { mutableStateOf(false) }
     var asrSensitivity by remember {
         mutableStateOf(
             prefs.getInt(PREF_ASR_SENSITIVITY, AsrEngine.SENSITIVITY_NORMAL)
@@ -551,18 +628,64 @@ private fun ChatScreen() {
                 Live2DController.speak()
                 isTyping = true
                 scope.launch {
-                    val history = buildList {
-                        add(DeepSeekClient.Msg("system", persona.effectivePrompt()))
-                        messages.takeLast(12).forEach {
-                            add(
-                                DeepSeekClient.Msg(
-                                    if (it.fromUser) "user" else "assistant",
-                                    it.text,
+                    // ---- 联网搜索：手动开了就搜，或者本地判断这句话需要查资料 ----
+                    val wantSearch = searchSettings.isReady() &&
+                        (forceSearch || SearchClient.needsSearch(text))
+                    var searchBlock: String? = null
+                    if (wantSearch) {
+                        val cfg = searchSettings.toEngineConfig()
+                        val r = withContext(Dispatchers.IO) { SearchClient.search(text, cfg) }
+                        searchBlock = r.fold(
+                            onSuccess = {
+                                SearchClient.formatForPrompt(text, it, cfg.providerName())
+                            },
+                            onFailure = {
+                                "＃ 联网搜索失败\n调用「${cfg.providerName()}」出错：${it.message}" +
+                                    "。请告诉用户这次没查成（可以检查设置里的搜索 Key），不要编造资料。"
+                                    .replace('＃', '#')
+                            },
+                        )
+                        if (r.isFailure) {
+                            messages.add(
+                                ChatMessage(
+                                    nextId++,
+                                    "搜索出错了：${r.exceptionOrNull()?.message}",
+                                    fromUser = false,
                                 )
                             )
                         }
                     }
-                    val result = DeepSeekClient.chat(apiKey, history)
+                    forceSearch = false
+
+                    val history = buildList {
+                        add(
+                            DeepSeekClient.Msg(
+                                "system",
+                                buildString {
+                                    append(persona.effectivePrompt())
+                                    searchBlock?.let { append("\n\n").append(it) }
+                                },
+                            )
+                        )
+                        messages.takeLast(12).forEach {
+                            // 搜索失败的提示气泡不进上下文，免得干扰模型
+                            if (it.fromUser || it.isModelReply) {
+                                add(
+                                    DeepSeekClient.Msg(
+                                        if (it.fromUser) "user" else "assistant",
+                                        it.text,
+                                    )
+                                )
+                            }
+                        }
+                    }
+                    val result = DeepSeekClient.chat(apiKey, history, deepseekModel)
+                    android.util.Log.d(
+                        "DSAI-Chat",
+                        "已发请求：模型=$deepseekModel，system ${history.first().content.length} 字，" +
+                            "时间注入=${history.first().content.contains("现在是 ")}，" +
+                            "联网搜索=${searchBlock != null}，历史 ${history.size - 1} 条",
+                    )
                     isTyping = false
                     result.onSuccess { reply ->
                         // isModelReply = true：存档标题只认模型真正回的话
@@ -675,6 +798,40 @@ private fun ChatScreen() {
                 fromUser = false,
             )
         )
+    }
+
+    // ------------------------------------------------------------------
+    // 屏幕常亮 + 切后台释放资源
+    // ------------------------------------------------------------------
+
+    // 前台常亮：这是个盯着看的 Live2D 陪伴 App，系统息屏会让语音聊天直接中断
+    // （用户报的"打开 App 会息屏"就是这个原因：没加 FLAG_KEEP_SCREEN_ON）。
+    DisposableEffect(Unit) {
+        val window = (context as? android.app.Activity)?.window
+        window?.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        onDispose {
+            window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
+
+    // 切到后台/息屏：立刻放开麦克风和播放器，别在后台占着资源
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            when (event) {
+                androidx.lifecycle.Lifecycle.Event.ON_PAUSE -> {
+                    // 保持 asrOn 状态，但把麦克风收掉；回前台自动接着听
+                    if (asr.isRecording) asr.cancel()
+                    tts.stop()
+                }
+                androidx.lifecycle.Lifecycle.Event.ON_RESUME -> {
+                    resumeListening()
+                }
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     DisposableEffect(Unit) {
@@ -801,6 +958,21 @@ private fun ChatScreen() {
             asrLoading = asrBusy,
             ttsSpeaking = ttsOn,
             micLevel = micLevel,
+            searchArmed = forceSearch,
+            searchReady = searchSettings.isReady(),
+            onSearchClick = {
+                forceSearch = !forceSearch
+                if (forceSearch && !searchSettings.isReady()) {
+                    messages.add(
+                        ChatMessage(
+                            nextId++,
+                            "还没配搜索服务呀～点左上角 ⚙️ →「联网搜索」填个 API Key，" +
+                                "之后我就能帮你查最新消息了 (๑•̀ㅂ•́)و",
+                            fromUser = false,
+                        )
+                    )
+                }
+            },
             onMicClick = {
                 if (asrOn) {
                     stopAsr()
@@ -817,12 +989,16 @@ private fun ChatScreen() {
     if (showSettings) {
         SettingsDialog(
             deepseekKey = apiKey,
+            deepseekModel = deepseekModel,
             tts = ttsSettings,
             persona = persona,
             asrSensitivity = asrSensitivity,
-            onSave = { newKey, newTts, newPersona, newSensitivity ->
+            search = searchSettings,
+            onSave = { newKey, newModel, newTts, newPersona, newSensitivity, newSearch ->
                 apiKey = newKey
                 prefs.edit().putString(PREF_KEY, newKey).apply()
+                deepseekModel = newModel
+                prefs.edit().putString(PREF_DEEPSEEK_MODEL, newModel).apply()
                 ttsSettings = newTts
                 saveTtsSettings(prefs, newTts)
                 persona = newPersona
@@ -830,7 +1006,13 @@ private fun ChatScreen() {
                 asrSensitivity = newSensitivity
                 prefs.edit().putInt(PREF_ASR_SENSITIVITY, newSensitivity).apply()
                 asr.sensitivity = newSensitivity
+                searchSettings = newSearch
+                saveSearchSettings(prefs, newSearch)
                 showSettings = false
+            },
+            onOpenCurl = {
+                showSettings = false
+                showCurl = true
             },
             onTest = { draft ->
                 // 试听：用草稿里的参数念一句，方便当场验证有没有填错
@@ -905,6 +1087,163 @@ private fun ChatScreen() {
             onDismiss = { showChatHistory = false },
         )
     }
+
+    if (showCurl) {
+        CurlDialog(
+            deepseekKey = apiKey,
+            searchSettings = searchSettings,
+            ttsSettings = ttsSettings,
+            onDismiss = { showCurl = false },
+        )
+    }
+}
+
+/**
+ * App 内 curl：填方法 / URL / 请求头 / 请求体，发出去把状态码和响应体原样显示。
+ *
+ * <p>手机上验接口用（搜索 Key 对不对、TTS 令牌还能不能用、DeepSeek 报什么错），
+ * 不用连着电脑看 logcat。
+ */
+@Composable
+private fun CurlDialog(
+    deepseekKey: String,
+    searchSettings: SearchSettings,
+    ttsSettings: TtsSettings,
+    onDismiss: () -> Unit,
+) {
+    val presets = remember(deepseekKey, searchSettings, ttsSettings) {
+        HttpProbe.presets(
+            deepseekKey = deepseekKey,
+            searchProvider = searchSettings.provider,
+            searchKey = searchSettings.apiKey,
+            ttsAppId = ttsSettings.appId,
+            ttsToken = ttsSettings.token,
+        )
+    }
+
+    var method by remember { mutableStateOf("POST") }
+    var url by remember { mutableStateOf(presets.firstOrNull()?.url ?: "https://") }
+    var headers by remember { mutableStateOf(presets.firstOrNull()?.headers ?: "") }
+    var body by remember { mutableStateOf(presets.firstOrNull()?.body ?: "") }
+    var result by remember { mutableStateOf("点下面的「发送请求」试一下～") }
+    var running by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = DeepSeaCard,
+        title = {
+            Text("网络调试（curl）", color = TextPrimary, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 430.dp)
+                    .verticalScroll(rememberScrollState()),
+            ) {
+                Text("预设", color = TextSecondary, fontSize = 11.sp)
+                Spacer(modifier = Modifier.height(4.dp))
+                presets.chunked(2).forEach { row ->
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        row.forEach { p ->
+                            TextButton(onClick = {
+                                method = p.method
+                                url = p.url
+                                headers = p.headers
+                                body = p.body
+                                result = "已填入「${p.label}」，点「发送请求」"
+                            }) {
+                                Text(p.label, color = WhaleCyan, fontSize = 12.sp)
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("GET", "POST", "PUT", "DELETE").forEach { m ->
+                        val selected = method == m
+                        Button(
+                            onClick = { method = m },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (selected) WhaleCyan else DeepSeaSoft,
+                                contentColor = if (selected) DeepSea else TextSecondary,
+                            ),
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                                horizontal = 12.dp,
+                                vertical = 2.dp,
+                            ),
+                        ) {
+                            Text(m, fontSize = 12.sp)
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(6.dp))
+                SettingsField(label = "URL", value = url, onValueChange = { url = it }, hint = "https://…")
+                SettingsField(
+                    label = "请求头（每行一个 Key: Value）",
+                    value = headers,
+                    onValueChange = { headers = it },
+                    hint = "Authorization: Bearer xxx",
+                    singleLine = false,
+                    minLines = 2,
+                )
+                SettingsField(
+                    label = "请求体（JSON）",
+                    value = body,
+                    onValueChange = { body = it },
+                    hint = "{}",
+                    singleLine = false,
+                    minLines = 3,
+                )
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Button(
+                        onClick = {
+                            running = true
+                            result = "请求中…"
+                            scope.launch {
+                                val r = withContext(Dispatchers.IO) {
+                                    HttpProbe.request(method, url, headers, body)
+                                }
+                                result = r.render()
+                                running = false
+                            }
+                        },
+                        enabled = !running && url.startsWith("http"),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = WhaleCyan,
+                            contentColor = DeepSea,
+                        ),
+                    ) {
+                        Text(if (running) "发送中…" else "发送请求", fontWeight = FontWeight.Bold)
+                    }
+                    Spacer(modifier = Modifier.width(10.dp))
+                    TextButton(onClick = { result = "" }) {
+                        Text("清空结果", color = TextSecondary, fontSize = 12.sp)
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = result,
+                    color = if (result.startsWith("HTTP 2")) WhaleCyan else TextSecondary,
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(DeepSeaSoft)
+                        .padding(8.dp),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("关闭", color = TextSecondary)
+            }
+        },
+    )
 }
 
 /**
@@ -1286,18 +1625,23 @@ private fun ModelSwitchButton(modelName: String, onClick: () -> Unit) {
 @Composable
 private fun SettingsDialog(
     deepseekKey: String,
+    deepseekModel: String,
     tts: TtsSettings,
     persona: PersonaSettings,
     asrSensitivity: Int,
-    onSave: (String, TtsSettings, PersonaSettings, Int) -> Unit,
+    search: SearchSettings,
+    onSave: (String, String, TtsSettings, PersonaSettings, Int, SearchSettings) -> Unit,
     onTest: (TtsSettings) -> Unit,
     onEditLive2d: () -> Unit,
+    onOpenCurl: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     var key by remember { mutableStateOf(deepseekKey) }
+    var modelDraft by remember { mutableStateOf(deepseekModel) }
     var draft by remember { mutableStateOf(tts) }
     var personaDraft by remember { mutableStateOf(persona) }
     var asrDraft by remember { mutableStateOf(asrSensitivity) }
+    var searchDraft by remember { mutableStateOf(search) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1322,6 +1666,50 @@ private fun SettingsDialog(
                     text = "在 platform.deepseek.com 申请",
                     color = TextSecondary,
                     fontSize = 11.sp,
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+                Text("模型", color = TextSecondary, fontSize = 11.sp)
+                Spacer(modifier = Modifier.height(4.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    MODEL_LABELS.forEach { (id, label) ->
+                        val selected = modelDraft == id
+                        Button(
+                            onClick = { modelDraft = id },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (selected) WhaleCyan else DeepSeaSoft,
+                                contentColor = if (selected) DeepSea else TextSecondary,
+                            ),
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                                horizontal = 12.dp,
+                                vertical = 4.dp,
+                            ),
+                        ) {
+                            Text(
+                                text = label,
+                                fontSize = 13.sp,
+                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                            )
+                        }
+                    }
+                }
+                Text(
+                    text = MODEL_HINTS.getOrElse(MODEL_LABELS.indexOfFirst { it.first == modelDraft }) { "" },
+                    color = TextSecondary,
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+
+                Spacer(modifier = Modifier.height(10.dp))
+                TextButton(onClick = onOpenCurl) {
+                    Text("🔧 网络调试（App 内 curl）", color = WhaleCyan, fontSize = 13.sp)
+                }
+                Text(
+                    text = "在手机上直接发 HTTP 请求看返回，用来验搜索 Key / TTS 令牌 / DeepSeek 报错",
+                    color = TextSecondary,
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp,
                 )
 
                 Spacer(modifier = Modifier.height(14.dp))
@@ -1362,6 +1750,68 @@ private fun SettingsDialog(
                     },
                     color = TextSecondary,
                     fontSize = 11.sp,
+                )
+
+                Spacer(modifier = Modifier.height(14.dp))
+                SettingsSectionTitle("联网搜索")
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("允许联网查资料", color = TextPrimary, fontSize = 14.sp)
+                    Spacer(modifier = Modifier.weight(1f))
+                    Switch(
+                        checked = searchDraft.enabled,
+                        onCheckedChange = { searchDraft = searchDraft.copy(enabled = it) },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = DeepSea,
+                            checkedTrackColor = WhaleCyan,
+                        ),
+                    )
+                }
+                Spacer(modifier = Modifier.height(6.dp))
+                Text("服务商", color = TextSecondary, fontSize = 11.sp)
+                Spacer(modifier = Modifier.height(4.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(
+                        SearchClient.PROVIDER_TAVILY to "Tavily",
+                        SearchClient.PROVIDER_BOCHA to "博查",
+                    ).forEach { (id, label) ->
+                        val selected = searchDraft.provider == id
+                        Button(
+                            onClick = { searchDraft = searchDraft.copy(provider = id) },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (selected) WhaleCyan else DeepSeaSoft,
+                                contentColor = if (selected) DeepSea else TextSecondary,
+                            ),
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                                horizontal = 14.dp,
+                                vertical = 4.dp,
+                            ),
+                        ) {
+                            Text(
+                                text = label,
+                                fontSize = 13.sp,
+                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                            )
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(6.dp))
+                SettingsField(
+                    label = "搜索 API Key",
+                    value = searchDraft.apiKey,
+                    onValueChange = { searchDraft = searchDraft.copy(apiKey = it) },
+                    hint = if (searchDraft.provider == SearchClient.PROVIDER_BOCHA) {
+                        "bochaai.com 的 API Key"
+                    } else {
+                        "tavily.com 的 API Key（tvly-…）"
+                    },
+                )
+                Text(
+                    text = "Tavily 英文资料强；博查（bochaai）中文资料强、国内可直连。" +
+                        "配好后：聊天里出现「最新 / 查一下 / 天气 / 股价」这类词会自动联网；" +
+                        "也可以点输入框左边的 🔍 手动查一次。",
+                    color = TextSecondary,
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp,
                 )
 
                 Spacer(modifier = Modifier.height(14.dp))
@@ -1502,7 +1952,9 @@ private fun SettingsDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = { onSave(key.trim(), draft, personaDraft, asrDraft) }) {
+            TextButton(onClick = {
+                onSave(key.trim(), modelDraft, draft, personaDraft, asrDraft, searchDraft)
+            }) {
                 Text("保存", color = WhaleCyan, fontWeight = FontWeight.Bold)
             }
         },
@@ -1598,6 +2050,9 @@ private fun InputBar(
     asrLoading: Boolean,
     ttsSpeaking: Boolean,
     micLevel: Float,
+    searchArmed: Boolean,
+    searchReady: Boolean,
+    onSearchClick: () -> Unit,
     onMicClick: () -> Unit,
 ) {
     Row(
@@ -1609,6 +2064,22 @@ private fun InputBar(
     ) {
         // 左下角：电话图标 = 本地语音输入开关
         MicButton(on = asrOn, loading = asrLoading, level = micLevel, onClick = onMicClick)
+
+        Spacer(modifier = Modifier.width(4.dp))
+
+        // 🔍 联网搜索：按下高亮，下一条消息先搜再问（没配 Key 时也能按，会提示去设置）
+        IconButton(onClick = onSearchClick, modifier = Modifier.size(36.dp)) {
+            Icon(
+                imageVector = Icons.Filled.Search,
+                contentDescription = "联网搜索",
+                tint = when {
+                    searchArmed -> WhaleCyan
+                    searchReady -> TextSecondary
+                    else -> TextSecondary.copy(alpha = 0.5f)
+                },
+                modifier = Modifier.size(20.dp),
+            )
+        }
 
         Spacer(modifier = Modifier.width(8.dp))
 

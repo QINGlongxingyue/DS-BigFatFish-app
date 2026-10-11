@@ -178,7 +178,14 @@ public class Live2DGLView extends GLSurfaceView {
         }
     }
 
-    /** GL 回调转发到单例。 */
+    /**
+     * GL 回调转发到单例。
+     *
+     * <p>⚠️ 这里【不要】做限帧。曾经试过限到 30fps 省电，结果模型会"抽"：
+     * 模型的 dt 取的是真实帧间隔（{@code CubismPal.updateTime()} 每帧算一次），
+     * 限帧后 dt 从 ~16ms 变成 ~33ms，带物理的模型（DeepSeek）在这种大步长下会抖动。
+     * 省电改由「切后台就 onPause」来保证。
+     */
     private static final class Live2DRenderer implements GLSurfaceView.Renderer {
         @Override
         public void onSurfaceCreated(GL10 gl, EGLConfig config) {
