@@ -37,9 +37,9 @@ class AsrEngine(private val context: Context) {
 
         /**
          * 电话式自动断句：连续静音这么久就认为这一句说完了，自动结束并识别。
-         * 想更灵敏就调小（比如 1200），想更宽容就调大。
+         * 想更灵敏就调小，想更宽容就调大。
          */
-        private const val SILENCE_MS = 2000
+        private const val SILENCE_MS = 2500
 
         /** RMS 低于这个值算「没声音」。安静环境约 0.005，底噪大的环境要调高。 */
         private const val SILENCE_RMS = 0.012
@@ -59,6 +59,9 @@ class AsrEngine(private val context: Context) {
 
     /** 检测到「说完了」（连续静音到点）时回调，UI 收到后走正常的收尾流程。 */
     var onAutoStop: (() -> Unit)? = null
+
+    /** 识别结果为空（没听清）。电话模式下这不算错误，接着听就行。 */
+    var onEmpty: (() -> Unit)? = null
 
     private var recognizer: OfflineRecognizer? = null
     private var recorder: AudioRecord? = null
@@ -293,10 +296,7 @@ class AsrEngine(private val context: Context) {
 
             if (sampleCount >= maxSamples) {
                 Log.d(TAG, "达到 ${MAX_SECONDS}s 上限，自动停止")
-                post {
-                    onError?.invoke("录满 ${MAX_SECONDS} 秒了，先帮你转成文字～")
-                    onAutoStop?.invoke()
-                }
+                post { onAutoStop?.invoke() }
                 break
             }
         }
@@ -319,7 +319,8 @@ class AsrEngine(private val context: Context) {
             Log.d(TAG, "解码完成（${System.currentTimeMillis() - started} ms）: $text")
             post {
                 if (text.isEmpty()) {
-                    onError?.invoke("没听清，再说一次试试？")
+                    // 没听清不是错误：电话模式下接着听下一句就行
+                    onEmpty?.invoke()
                 } else {
                     onResult?.invoke(text)
                 }

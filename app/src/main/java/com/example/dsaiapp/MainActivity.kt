@@ -204,17 +204,6 @@ private fun ChatScreen() {
     var micLevel by remember { mutableStateOf(0f) }
     val scope = rememberCoroutineScope()
 
-    // TTS 播放期间用音量驱动 Live2D 口型（顺带把"口型同步"这个 TODO 做掉）
-    LaunchedEffect(tts) {
-        tts.onStart = { ttsOn = true }
-        tts.onDone = {
-            ttsOn = false
-            Live2DController.setMouthOpen(0f)
-        }
-        tts.onLevel = { level -> if (level > 0.02f) Live2DController.setMouthOpen(level) }
-        tts.onError = { msg -> messages.add(ChatMessage(nextId++, msg, fromUser = false)) }
-    }
-
     val startAsr: () -> Unit = {
         asrOn = true
         scope.launch {
@@ -224,30 +213,142 @@ private fun ChatScreen() {
                 asrBusy = false
                 if (!ok) asrOn = false
             }
-            if (asrOn) asr.start()
+            if (asrOn && !asr.isRecording) asr.start()
         }
     }
 
+    /** 关掉电话：把最后一句也识别出来，之后不再接着听。 */
     val stopAsr: () -> Unit = {
         asrOn = false
         micLevel = 0f
-        asrBusy = true
-        asr.stopAndDecode()
+        if (asr.isRecording) {
+            asrBusy = true
+            asr.stopAndDecode()
+        }
     }
 
-    // 识别结果接到输入框后面（可以一句话一句话地攒）；出错就在聊天里说一声。
-    // 放在 stopAsr 之后注册，因为「静音自动断句」要复用同一套收尾流程。
+    /**
+     * 恢复「听」。只在真正轮到用户说话时才开麦：
+     * 电话模式开着、没在等回复（isTyping）、也没在朗读（ttsOn）。
+     */
+    val resumeListening: () -> Unit = {
+        if (asrOn && !isTyping && !ttsOn && !asr.isRecording) asr.start()
+    }
+
+    /**
+     * 发一条消息并取回复。手动输入和**语音识别结果**都走这里
+     * （电话模式下识别出内容就直接发，不留在输入框里）。
+     */
+    val sendText: (String) -> Unit = { raw ->
+        val text = raw.trim()
+        if (text.isNotEmpty()) {
+            // 说完这一句：先把麦收掉，等 AI 回完、朗读完再开（否则她会听见自己说话）
+            if (asr.isRecording) asr.cancel()
+            tts.stop()
+            messages.add(ChatMessage(nextId++, text, fromUser = true))
+            input = ""
+
+            if (apiKey.isBlank()) {
+                messages.add(
+                    ChatMessage(
+                        nextId++,
+                        "呜…还没有 API Key，点左上角的 ⚙️ 填一下嘛~ (｡•́︿•̀｡)",
+                        fromUser = false,
+                    )
+                )
+                resumeListening()
+            } else {
+                // 说话动画 + 请求（历史里带最近 12 条，让模型有上下文）
+                Live2DController.speak()
+                isTyping = true
+                scope.launch {
+                    val history = buildList {
+                        add(DeepSeekClient.Msg("system", SYSTEM_PROMPT))
+                        messages.takeLast(12).forEach {
+                            add(
+                                DeepSeekClient.Msg(
+                                    if (it.fromUser) "user" else "assistant",
+                                    it.text,
+                                )
+                            )
+                        }
+                    }
+                    val result = DeepSeekClient.chat(apiKey, history)
+                    isTyping = false
+                    result.onSuccess { reply ->
+                        messages.add(ChatMessage(nextId++, reply, fromUser = false))
+                        Live2DController.speak()
+                        // 回复里的关键字 → 表情/动作
+                        ModelReactions.react(reply, Live2DController.currentModelName())
+                        // 豆包 TTS 朗读（配好了才读）；没配就用简单的张嘴动画
+                        if (ttsSettings.isReady()) {
+                            // 朗读期间不开麦；tts.onDone 里会 resumeListening()
+                            tts.speak(reply, ttsSettings.toEngineConfig())
+                        } else {
+                            scope.launch {
+                                delay(900)
+                                Live2DController.setMouthOpen(0f)
+                                resumeListening()
+                            }
+                        }
+                    }.onFailure { e ->
+                        messages.add(
+                            ChatMessage(nextId++, "呜…调用出错了：${e.message}", fromUser = false)
+                        )
+                        resumeListening()
+                    }
+                }
+            }
+        }
+    }
+
+    // TTS 播放期间用音量驱动 Live2D 口型，并且朗读时不开麦（免得她听见自己）
+    LaunchedEffect(tts) {
+        tts.onStart = {
+            ttsOn = true
+            if (asr.isRecording) asr.cancel()
+        }
+        tts.onDone = {
+            ttsOn = false
+            Live2DController.setMouthOpen(0f)
+            // 注意：onDone 现在等的是【真的播完】（播放头追上写入帧数），不是"服务端发完"
+            resumeListening()
+        }
+        tts.onLevel = { level -> if (level > 0.02f) Live2DController.setMouthOpen(level) }
+        tts.onError = { msg -> messages.add(ChatMessage(nextId++, msg, fromUser = false)) }
+    }
+
+    /**
+     * 电话模式的核心：**功能开着就一直循环「听 → 静音 2.5 秒断句 → 识别 → 直接发送」**，
+     * 不需要重新按按钮。发送后麦克风会先收起来，等 AI 回完、朗读完（resumeListening）再开。
+     */
     LaunchedEffect(asr) {
         asr.onResult = { text ->
             asrBusy = false
-            input = if (input.isBlank()) text else input.trimEnd() + " " + text
+            // 识别出来直接发；发送后由 AI 回复/朗读流程决定什么时候再开麦
+            sendText(text)
+        }
+        asr.onEmpty = {
+            // 没听清：不出提示、不退出，安静地继续听
+            asrBusy = false
+            resumeListening()
         }
         asr.onError = { msg ->
+            // 真错误（麦克风不可用、解码失败等）才退出电话模式并提示
             asrBusy = false
+            asrOn = false
             messages.add(ChatMessage(nextId++, msg, fromUser = false))
         }
         asr.onLevel = { level -> micLevel = level }
-        asr.onAutoStop = { if (asrOn) stopAsr() }
+        asr.onAutoStop = {
+            // 静音到点：收尾识别，但**保持 asrOn**，出了结果自动接着听
+            if (asrOn) {
+                asrBusy = true
+                asr.stopAndDecode()
+            } else {
+                asr.cancel()
+            }
+        }
     }
 
     val micPermission = rememberLauncherForActivityResult(
@@ -357,6 +458,7 @@ private fun ChatScreen() {
             onValueChange = { input = it },
             asrOn = asrOn,
             asrLoading = asrBusy,
+            ttsSpeaking = ttsOn,
             micLevel = micLevel,
             onMicClick = {
                 if (asrOn) {
@@ -367,65 +469,7 @@ private fun ChatScreen() {
                     micPermission.launch(Manifest.permission.RECORD_AUDIO)
                 }
             },
-            onSend = {
-                val text = input.trim()
-                if (text.isNotEmpty()) {
-                    // 发送时把语音输入停掉，免得边发边录；同时打断正在朗读的上一句
-                    if (asrOn) stopAsr()
-                    tts.stop()
-                    messages.add(ChatMessage(nextId++, text, fromUser = true))
-                    input = ""
-
-                    if (apiKey.isBlank()) {
-                        messages.add(
-                            ChatMessage(
-                                nextId++,
-                                "呜…还没有 API Key，点左上角的 ⚙️ 填一下嘛~ (｡•́︿•̀｡)",
-                                fromUser = false,
-                            )
-                        )
-                        return@InputBar
-                    }
-
-                    // 说话动画 + 请求（历史里带最近 12 条，让模型有上下文）
-                    Live2DController.speak()
-                    isTyping = true
-                    scope.launch {
-                        val history = buildList {
-                            add(DeepSeekClient.Msg("system", SYSTEM_PROMPT))
-                            messages.takeLast(12).forEach {
-                                add(
-                                    DeepSeekClient.Msg(
-                                        if (it.fromUser) "user" else "assistant",
-                                        it.text,
-                                    )
-                                )
-                            }
-                        }
-                        val result = DeepSeekClient.chat(apiKey, history)
-                        isTyping = false
-                        result.onSuccess { reply ->
-                            messages.add(ChatMessage(nextId++, reply, fromUser = false))
-                            Live2DController.speak()
-                            // 回复里的关键字 → 表情/动作
-                            ModelReactions.react(reply, Live2DController.currentModelName())
-                            // 豆包 TTS 朗读（配好了才读）；没配就用简单的张嘴动画
-                            if (ttsSettings.isReady()) {
-                                tts.speak(reply, ttsSettings.toEngineConfig())
-                            } else {
-                                scope.launch {
-                                    delay(900)
-                                    Live2DController.setMouthOpen(0f)
-                                }
-                            }
-                        }.onFailure { e ->
-                            messages.add(
-                                ChatMessage(nextId++, "呜…调用出错了：${e.message}", fromUser = false)
-                            )
-                        }
-                    }
-                }
-            },
+            onSend = { sendText(input) },
         )
     }
 
@@ -736,6 +780,7 @@ private fun InputBar(
     onSend: () -> Unit,
     asrOn: Boolean,
     asrLoading: Boolean,
+    ttsSpeaking: Boolean,
     micLevel: Float,
     onMicClick: () -> Unit,
 ) {
@@ -759,7 +804,8 @@ private fun InputBar(
                 Text(
                     text = when {
                         asrLoading -> "识别中…"
-                        asrOn -> "正在听…停 2 秒就自动识别"
+                        ttsSpeaking && asrOn -> "正在朗读…说完会自动接着听"
+                        asrOn -> "电话已接通：一直听着，停 2 秒自动出字"
                         else -> "跟大肥鱼说点什么…"
                     },
                     color = TextSecondary,

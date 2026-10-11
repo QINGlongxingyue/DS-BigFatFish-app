@@ -120,7 +120,25 @@ class TtsEngine {
     private var audioBytes = 0L
     private var audioChunks = 0
 
+    /**
+     * onDone 是否已经报过。
+     *
+     * 朗读结束有两条路径：音频真正播完 / 被新朗读打断。用这个标志保证只回调一次。
+     */
+    @Volatile
+    private var doneReported = true
+
     fun isSpeaking(): Boolean = speaking
+
+    /** 报一次「念完了」（幂等）。 */
+    private fun reportDone() {
+        if (doneReported) return
+        doneReported = true
+        main {
+            onLevel?.invoke(0f)
+            onDone?.invoke()
+        }
+    }
 
     // ------------------------------------------------------------------
     // 对外接口
@@ -134,6 +152,7 @@ class TtsEngine {
         stop()
 
         speaking = true
+        doneReported = false
         sessionId = UUID.randomUUID().toString()
         uid = UUID.randomUUID().toString()
         pendingText = clean
@@ -184,6 +203,8 @@ class TtsEngine {
         audioTrack = null
 
         if (wasSpeaking) {
+            // 被打断也算一次结束：先把标志置上，免得播放线程退出时再报一次
+            doneReported = true
             main {
                 onLevel?.invoke(0f)
                 onDone?.invoke()
@@ -291,14 +312,17 @@ class TtsEngine {
                         ws.send(ByteString.of(*buildFrame(EV_FINISH_CONNECTION, null, "{}")))
                         Log.d(
                             TAG,
-                            "合成完成：${audioChunks} 块 / ${audioBytes} 字节 ≈ " +
-                                "${audioBytes / 2f / SAMPLE_RATE} 秒",
+                            "音频收完：${audioChunks} 块 / ${audioBytes} 字节 ≈ " +
+                                "${audioBytes / 2f / SAMPLE_RATE} 秒（等播放器放完再通知）",
                         )
                         speaking = false
-                        audioQueue.offer(poison)
-                        main {
-                            onLevel?.invoke(0f)
-                            onDone?.invoke()
+                        // ⚠️ 这里【不能】直接 onDone：服务端发完 ≠ 已经放完，
+                        // AudioTrack 里还压着 1~2 秒缓冲。让播放线程把缓冲放干净后再回调，
+                        // 否则电话模式会在她还在说话时就恢复录音，把她的声音又识别一遍。
+                        if (playThread != null) {
+                            audioQueue.offer(poison)
+                        } else {
+                            reportDone()
                         }
                     }
                     EV_TTS_SENTENCE_START, EV_TTS_SENTENCE_END, EV_TTS_RESPONSE -> Unit
@@ -536,7 +560,28 @@ class TtsEngine {
                 val level = (rms * 6).coerceIn(0.0, 1.0).toFloat()
                 main { onLevel?.invoke(level) }
             }
-            Log.d(TAG, "播放线程结束，共写入 $written 字节")
+
+            // 队列排空后，等「播放头」真的走到写入的帧数——写完 ≠ 放完，
+            // AudioTrack 里还压着一两秒缓冲，不等它就会出现"她还在说，麦克风已经开录"。
+            val totalFrames = (written / 2).toInt() // 16bit 单声道：2 字节 1 帧
+            val deadline = System.currentTimeMillis() + 15_000L
+            while (written > 0L &&
+                track.playState == AudioTrack.PLAYSTATE_PLAYING &&
+                track.playbackHeadPosition < totalFrames &&
+                System.currentTimeMillis() < deadline
+            ) {
+                try {
+                    Thread.sleep(40)
+                } catch (e: InterruptedException) {
+                    break
+                }
+            }
+            Log.d(
+                TAG,
+                "播放线程结束：写入 $written 字节，播放头 ${track.playbackHeadPosition}/$totalFrames 帧",
+            )
+            runCatching { track.stop() }
+            reportDone()
         }, "dsai-tts-play").apply { start() }
     }
 
