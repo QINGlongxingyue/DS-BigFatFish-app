@@ -1,46 +1,23 @@
-# 第三方资源声明（Third-Party Notices）
+DSAI — 大肥鱼 × DeepSeek Live2D 聊天 App
+Copyright 2026 QINGlongxingyue
 
-本仓库使用的两个 Live2D 模型均为开源模型，版权归原作者所有。按作者要求，此处保留署名。
+SPDX-License-Identifier: Apache-2.0
 
----
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
 
-## 模型1：大肥鱼
+    http://www.apache.org/licenses/LICENSE-2.0
 
-- **作者**：B站 [@Mao绒绒家园](https://space.bilibili.com/)
-- **授权**：开源模型，使用时须保留作者署名
-- **在项目中的位置**：`app/src/main/assets/live2d/dafeiyu/`
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
 
-## 模型2：DeepSeek
-
-- **来源**：<https://github.com/lrplrplrp/dsh-live2d>
-- **授权协议**：Apache License 2.0（全文附于本文件末尾）
-- **在项目中的位置**：`app/src/main/assets/live2d/deepseeklive2dmodel2/`
-- **Apache-2.0 分发义务对照**：
-  - 4(a) 随分发提供协议副本 → 本文件末尾全文
-  - 4(c) 保留来源与署名 → 见上
-
----
-
-## 其他第三方组件
-
-- **Cubism SDK for Java 5-r.5**（框架源码内嵌 + Core 运行库 AAR）：© Live2D Inc.，
-  遵循 Live2D Open Software License。公开分发前请自行确认 Live2D 的 SDK 发行许可
-  （个人/小规模通常免费，商用前建议咨询 [Live2D 官方](https://www.live2d.jp/chn/contact/)）
-- **语音识别模型**：**阿里达摩院 FunASR / Paraformer-zh-small**（2024-03-09），
-  在本项目里以 onnx 形式内置于 `app/src/main/assets/asr/`。
-  FunASR 为开源项目（https://github.com/modelscope/FunASR），模型使用请遵循其仓库与模型页说明。
-  本项目所用 onnx 版本由 [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) 导出
-- **sherpa-onnx 1.13.8**（本地推理运行时，`app/libs/sherpa-onnx-1.13.8.aar`）：
-  k2-fsa 开源项目，**Apache License 2.0**（协议全文见本文件末尾）
-- **OkHttp 4.12**（TTS 的 WebSocket 客户端）：Square 开源项目，**Apache License 2.0**
-- **豆包语音合成（TTS）**：火山引擎线上服务（https://www.volcengine.com/product/voice-tech），
-  非本地组件；使用时需自行开通并遵守其服务条款，按量计费
-- **API 服务**：[DeepSeek Open Platform](https://platform.deepseek.com)
-
----
-
-# Apache License
-
+===============================================================================
+The full text of the Apache License, Version 2.0 follows.
+===============================================================================
                            Version 2.0, January 2004
                         http://www.apache.org/licenses/
 

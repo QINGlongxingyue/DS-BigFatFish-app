@@ -1,212 +1,187 @@
-# DSAI —— 大肥鱼 × DeepSeek Live2D 聊天 App
+# DSAI — 大肥鱼 × DeepSeek 的 Live2D 手机助手
 
-一个 Android 端的 Live2D AI 聊天应用：桌面上养一只 Live2D 角色陪你聊天，接入 DeepSeek 官方 API，模型会根据回复内容做表情和动作。
+一个跑在 Android 手机上的**桌宠 + AI 助手**：屏幕上是会眨眼、会看你、会跟着声音张嘴的 Live2D 大肥鱼，
+你可以打字或用语音跟她聊天，她回答时能出声朗读、还能自己做表情。
 
-内置两只模型，右上角按钮一键切换：
+> 对话用 DeepSeek 官方 API；语音识别在本机离线跑（不联网、录音不出手机）；
+> 朗读用豆包（火山引擎）双向流式 TTS；需要查资料时能联网搜索。
+
+---
+
+## 目录
+
+- [功能一览](#功能一览)
+- [安装](#安装)
+- [首次设置（教程）](#首次设置教程)
+- [怎么用](#怎么用)
+- [从源码构建](#从源码构建)
+- [常见问题](#常见问题)
+- [目录结构](#目录结构)
+- [版权与致谢](#版权与致谢)
+
+---
+
+## 功能一览
+
+| 功能 | 说明 | 需要配置 |
+|---|---|---|
+| Live2D 桌宠 | 两个模型可切换；眨眼 / 呼吸 / 视线跟随手指；被点到会看你 | 不需要 |
+| AI 对话 | DeepSeek 官方接口，模型可选：标准 / 深度思考 / 快速 | **DeepSeek API Key** |
+| 表情与动作 | 回复里出现「开心 / 生气 / 害羞 / 思考 / 好吃」等词自动做表情，随机 4~7 秒后淡出 | 不需要 |
+| 语音输入 | 电话模式：按一下开始听，停下 2.5 秒自动断句并**直接发送**；本地离线识别 | 不需要 |
+| 语音朗读 | AI 回复自动念出来，口型跟着音量动；朗读期间麦克风自动让开 | **豆包 App ID / Token / 音色 ID** |
+| 联网搜索 | 内置搜索（免 Key）/ 博查 / Tavily；可自动判断也可手动强制 | 可选 |
+| 对话存档 | 多条对话以列表保存，随时切回去接着聊 | 不需要 |
+| 人设与记忆 | 自定义系统提示词；可贴一段「辅助记忆文档」长期带上 | 可选 |
+| 时间感知 | 每次请求都会告诉模型当前日期、星期、时间 | 不需要 |
+| 位置与大小 | 单指拖动移动、双指捏合缩放，按模型分别记住 | 不需要 |
+
+默认自带两个 Live2D 模型，右上角一键切换：
 
 | 模型 | 说明 |
-| --- | --- |
-| 大肥鱼（默认） | DeepSeek 吉祥物风格的蓝鲸女孩，VTube Studio 导出的皮，15 个表情 |
+|---|---|
+| 大肥鱼（默认） | 蓝鲸女孩，VTube Studio 导出的皮，15 个表情 |
 | DeepSeek | DeepSeek 官方鲸鱼模型，自带 Idle / 说话 / 思考动作组和 5 个表情 |
 
-## 功能
+---
 
-- **Live2D 渲染**：Cubism SDK for Java 5-r.5（框架源码内嵌，无需 NDK）
-- **对话**：DeepSeek 官方 API（POST `api.deepseek.com/chat/completions`，模型 `deepseek-flash`），带最近 12 条上下文
-- **API Key 管理**：左上角设置按钮填 Key，只存本机 SharedPreferences，不上传
-- **模型可选**（设置 → 模型）：`deepseek-chat` 标准（默认）/ `deepseek-reasoner` 深度思考（更聪明、慢）/
-  `deepseek-flash` 快速。reasoner 会读 `content`，为空时回退 `reasoning_content`
-- **知道当前时间**：每次请求都把「现在是 yyyy-MM-dd（星期）HH:mm 时区」现算一份塞进 system，
-  所以「今天星期几 / 明天几号」这种问题能答对（模型自己是不知道"现在"的）
-- **联网搜索**（设置 → 联网搜索）：DeepSeek 的对话接口自己不能上网，这里用「工具调用」把搜索交给模型决定：
-  模型只负责给出**查询词**，**请求与解析全由 App 干**（不向模型暴露原始 HTTP 工具，让它自己拼请求既不可靠也不安全）。
-  搜索服务三档：**内置(免Key)**（默认，App 直接解析 cn.bing.com 的结果，装好即用）/
-  **博查 bochaai**（中文强、国内直连）/ **Tavily**（英文强）——后两档需要 Key。
-  触发方式：模型自己判断要不要查；也可以点输入框左边的 🔍 强制先查（**开关状态会记住**，开着就一直有效，
-  再按一下才关）。搜到的资料连来源一起塞进 system，并要求标注来源、查不到就说没查到；
-  `deepseek-flash` 不支持工具调用，会退化成「本地关键词判断 + 预搜索」那条路
-- **网络调试（App 内 curl）**：实现保留在 `CurlDialog`（可填方法/URL/请求头/请求体，原样显示状态码、
-  响应头、响应体、耗时，带 DeepSeek / 搜索 / 豆包 TTS / 出口 IP 四个预设），
-  **入口已从设置界面摘掉**（按需求不显示），需要时加一行按钮即可放回
-- **人设与辅助记忆**（设置里可改）：系统提示词留空就用内置默认人设（分节写的结构化提示词：
-  角色/性格/语言风格/回复长度/行为准则/动作标签），也可以自己改；另有「辅助记忆文档」一栏，
-  粘一段设定/备忘会以独立的「长期记忆」小节随每次请求一起发给模型
-- **对话列表**（左上角聊天图标，和设置按钮同尺寸）：**每次打开 App 都是新对话**，
-  列表里每段存档显示标题（取第一条你说的话）、消息数、保存时间和最后一句预览，
-  点一下即可切回去继续聊，右侧垃圾桶删除（有二次确认），顶部「＋ 新对话 / 保存当前」；
-  **新建或切换前会自动把当前这段存档，不会丢**
-- **Live2D 位置与大小**（设置 → Live2D 显示 → 调整位置和大小）：进入后**单指拖动 = 移动**、
-  **双指捏合 = 缩放**，顶栏出现「完成 / 恢复默认」，完成后按模型分别记住
-  - 平移直接写进正交投影矩阵的第 4 列（NDC 单位），缩放有 0.25~3.0 的夹取、平移有 ±1.2 的夹取，
-    手滑也不会把模型拖没影
-  - 多指切换（按下/抬起第二根手指）那一帧只重置基准不做位移，避免模型"跳一下"
-- **关键字驱动表情/动作**：模型回复里带关键词时自动触发，两套表情各自映射：
-  - 「开心 / 哈哈」→ 笑；「生气」→ 脸黑；「害羞」→ 脸红
-  - 「思考 / 想想」→ DeepSeek 播 thinking 动作
-  - 「好吃 / 馋」→ 流口水……完整映射见 `app/src/main/java/com/example/dsaiapp/chat/ModelReactions.kt`
-  - 表情**随机 4~7 秒后自动淡出**回默认状态（Cubism 的表达式不会自己消失，这里用一个空白表情
-    触发框架自带的淡出：旧表情权重 1 → 0 平滑过渡。时长见 `Live2DModel` 的 `EXPRESSION_MIN_MS/MAX_MS`）
-- **本地离线语音输入（电话模式）**：左下角电话图标，**按一下开启、再按一下关闭**。
-  开启后一直听着：说话停下 **2.5 秒**自动断句识别，**识别结果直接作为消息发出**；
-  等 AI 回复、TTS 朗读期间麦克风自动让开，念完自动接着听——像打电话一样来回。
-  识别跑的是**阿里达摩院 FunASR 的 Paraformer 中文模型**，全在本机推理，不联网、不花 API 的钱、录音不出手机
-  - 断句参数：`AsrEngine` 里的 `SILENCE_MS`（2500）/`SILENCE_RMS`（0.012）
-  - **音量门槛（同一门槛驱动"有没有在说"和"说了多久"）**：三档灵敏度可选（设置 → 语音输入）
-    灵敏 0.006 / 标准 0.012 / 抗噪 0.030。⚠️ 早先"判有声音"用 0.012、"判说话时长"用 0.025，
-    音量落在中间的人会陷入「静音计时被不断重置 → 永远不断句 → 到 60 秒上限 → 整段被丢掉」，
-    表现就是正常说话却毫无反应；现在合成一个门槛，不会再有这种卡死
-  - **动态范围判据**：整段峰值必须 ≥ 平均值的 2 倍才算人说话。风扇/空调这类稳态底噪
-    峰值≈平均值（约 1.0）会被挡住，于是音量门槛可以压得很低，小声说话也能识别
-  - 录音结束日志会打印「说话累计 Nms / 峰值 / 平均 / 动态 / 门槛」，照着调灵敏度即可
-  - 「轮到你说话才开麦」的闸门：`MainActivity` 的 `resumeListening()`
-- **语音朗读回复**：接 **豆包（火山引擎）双向流式 TTS**，AI 回复自动念出来；
-  播放时用音量驱动 Live2D 口型，模型会跟着「说话」
-  - ⚠️ 朗读的「结束」必须等**播放头追上写入帧数**（`AudioTrack.playbackHeadPosition`），
-    不能拿「服务端把音频发完」当结束——那时缓冲里还压着一两秒，提前开麦会让她听见自己念的内容
-- **待机动画**：眨眼 / 呼吸 / 视线跟随手指（手写参数驱动，不依赖动作文件）
-- **水印隐藏**：大肥鱼的水印参数每帧压制
-- 深海主题 UI：Compose + Material3，气泡聊天、正在输入指示
+## 安装
 
-## 构建
+1. 下载本仓库 **Releases** 里的 `DSAI.apk`（或自行构建，见下文）
+2. 手机上允许「安装未知来源的应用」
+3. 装好打开即可
 
-### Android Studio（推荐）
+首次启动会加载模型（约 1~3 秒），画面先空着是正常的。
 
-直接 Open 本目录，等 Gradle Sync 完，Run 即可。
+---
 
-### 命令行
+## 首次设置（教程）
 
-```powershell
-$env:JAVA_HOME = "C:\Program Files\Android\Android Studio\jbr"   # 需要 JDK 17+，用 AS 自带 JBR 最稳
-.\gradlew.bat :app:assembleDebug
-# 产物：app\build\outputs\apk\debug\app-debug.apk
+点左上角 **⚙️ 设置**，按需填下面几项。**只有第一项是必填的。**
 
-# 给手机装的话建议打 release（R8 压缩 + 只带 64 位原生库，约 148MB，debug 包会到 195MB）
-.\gradlew.bat :app:assembleRelease
-# release 已配置成用 debug 签名，所以能直接安装
+| 设置项 | 填什么 | 必填 |
+|---|---|---|
+| **API Key** | 到 [platform.deepseek.com](https://platform.deepseek.com) 申请，形如 `sk-…` | ✅ 必填 |
+| **模型** | `标准`（默认，推荐）/ `深度思考`（更聪明、慢）/ `快速` | 默认即可 |
+| **人设与记忆** → 系统提示词 | 留空 = 用内置的大肥鱼人设；想改性格或说话风格就自己写 | 可选 |
+| **人设与记忆** → 辅助记忆文档 | 粘一段希望她长期记住的资料（设定、日程、偏好），每次对话都会带上 | 可选 |
+| **联网搜索** | `内置(免Key)`（默认，装好就能用）/ `博查` / `Tavily`（后两者需 API Key） | 可选 |
+| **语音输入** → 灵敏度 | `灵敏 / 标准 / 抗噪`。正常音量用标准；环境吵（风扇、空调）用抗噪；小声说话用灵敏 | 默认即可 |
+| **语音朗读（TTS）** | 火山引擎控制台的 **App ID / Access Token / 音色 ID**，资源 ID 默认 `volc.megatts.default`；填完可点「试听一句」 | 可选 |
+| **Live2D 显示** | 点「调整位置和大小」进入编辑（见下文） | 可选 |
+
+> 语音朗读的凭据要在**同一个应用**里复制 App ID 和 Access Token（跨应用会报 grant not found）；
+> 自己复刻的音色 ID 是 `S_` 开头，资源 ID 用 `volc.megatts.default`。
+
+---
+
+## 怎么用
+
+### 聊天
+
+- 下方输入框打字，点 **发送**（或键盘回车）
+- 她的回复会自动朗读（如果配了语音朗读）
+- 回复里带情绪关键词时，她会自己做表情或动作
+
+### 语音输入（电话模式）
+
+- 点左下角 **电话图标** 开启：图标变红并呼吸 = 正在听
+- 说完**停约 2.5 秒**，她自动断句 → 识别 → **直接把这句话发出去**，不用你再点发送
+- 等回复和朗读期间麦克风会自动让开（免得她听见自己说话），朗读完自动继续听
+- **再点一下电话图标**关闭；关闭时也会把最后一句识别出来
+
+### 联网搜索
+
+- 输入框左边的 **🔍** 点亮 = 之后每条消息都会先查资料再回答（**状态会记住**，重开 App 还是这样）
+- 不点亮时，消息里出现「最新 / 查一下 / 天气 / 股价」这类词，或是个问句，也会自动去查
+- 搜到的资料会连来源一起交给模型，并要求她**标注来源、查不到就说没查到**
+
+### 对话存档
+
+点左上角 **🗨 图标**：
+
+- 每段对话以列表显示（标题 / 条数 / 时间 / 最后一句预览）
+- **标题取模型的第一句回复**，没有回复就用时间
+- 点整行 = 切回那段对话继续聊；右侧垃圾桶 = 删除（有二次确认）
+- 顶部 **「＋ 新对话」** = 开一段新的（**会先把当前这段自动存进列表**，不会丢）
+- 每次打开 App 都是新对话，想接着上次聊就从这里恢复
+
+### 调整 Live2D 位置和大小
+
+1. 设置 → **Live2D 显示** → 「调整位置和大小」（设置会自动关闭）
+2. 在舞台里：**单指拖动 = 移动**，**双指捏合 = 放大缩小**
+3. 右上角 **完成** 保存（**按模型分别记住**，切换模型各用各的）；「恢复默认」可还原
+
+---
+
+## 从源码构建
+
+需要 **JDK 17+**（Android Studio 自带的 JBR 即可）和 Android SDK。
+
+```bash
+# 在 DSAIAPP 目录下
+./gradlew :app:assembleDebug      # 调试包
+./gradlew :app:assembleRelease    # 发布包（R8 压缩，体积小很多）
 ```
 
-踩过的坑：
+产物在 `app/build/outputs/apk/<变体>/`。release 已配置成使用 debug 签名，可直接安装。
 
-- 不要用系统 PATH 里的 JDK 8 编译，AGP 会直接失败
-- 工程刻意不用 `jvmToolchain()`——它会去 github.com 下载 JDK，网络不通时构建必挂；改用 `compileOptions` 加 `jvmTarget` 对齐字节码，不联网
-- 最低 API 24，target 37；原生库只带 arm64-v8a / x86_64（真机 + 64 位模拟器够了，砍掉 32 位 x86 省约 36MB）
-- **别引 `material-icons-extended`**：那套库 5000+ 图标 × 5 风格，不开 R8 的 debug 包会因此多出约 79MB 的 dex。
-  本项目只用核心图标集（Settings / Phone / Send），切换图标是本地矢量 `res/drawable/ic_swap_horiz.xml`
-- 开 R8 后必须保留 JNI 相关的类，见 `app/src/main/keepRules/rules.keep`（原因写在文件注释里，是真实踩出来的）
+也可以用 Android Studio 直接 Open `DSAIAPP` 目录，等 Gradle Sync 完点 Run。
 
-## 使用
+> 包体较大的原因：内置了离线语音识别模型（`app/src/main/assets/asr/model.int8.onnx`，约 78MB）
+> 和 sherpa-onnx 运行时。它换来了**不联网、不额外花钱**的本地语音识别。
 
-1. 装上 App，等模型加载（首帧 3 到 5 秒）
-2. 点左上角设置按钮：
-   - **DeepSeek 对话**：填 API Key（在 platform.deepseek.com 申请）
-   - **豆包语音朗读**：填 App ID / Access Token / 音色 ID（在火山引擎控制台开通「语音合成大模型」后获取），
-     打开「自动朗读回复」，可以点「试听一句」当场验证
-3. 底部输入框开聊；没填 Key 会提示
-4. 右上角胶囊按钮切换 大肥鱼 / DeepSeek
-5. 想说话就点左下角**电话图标**：变红 = 正在录音，再点一下 = 停止并识别，文字会填进输入框
+---
 
-## 语音朗读（豆包 TTS）
+## 常见问题
 
-- **接口**：火山引擎豆包**双向流式 TTS**（WebSocket），官方文档
-  [bidirectional-streaming-text-to-speech-websocket](https://docs.volcengine.com/docs/DoubaoVoice/bidirectional-streaming-text-to-speech-websocket?lang=zh)
-- **端点**：`wss://openspeech.bytedance.com/api/v3/tts/bidirection`
-- **鉴权**：`Authorization: Bearer;<Access Token>`（注意是**分号**）+ `X-Api-App-Key`（App ID）
-  + `X-Api-Access-Key` + `X-Api-Resource-Id` + `X-Api-Connect-Id`
-- **协议**：二进制帧 + 事件机。帧头 4 字节（`0x11` 版本 / `0x14` 客户端 / `0x94` 服务端响应 / `0xB4` 服务端音频，
-  JSON 不压缩），后面跟 event（i32 大端）、可选的 session_id、payload。
-  流程：`StartConnection(1)` → `ConnectionStarted(50)` → `StartSession(100)` → `SessionStarted(150)`
-  → `TaskRequest(200)`（带文本）→ 一串 `350/352/351`（音频在 `0xB4` 帧里）→ `FinishSession(102)` → `SessionFinished(152)` → `FinishConnection(2)`
-- **音频**：请求 PCM 24kHz 单声道，收到音频块立刻丢给 `AudioTrack` 边收边放（不用等整段合成完）
-- **口型同步**：播放线程顺便算每块 PCM 的 RMS，喂给 `Live2DController.setMouthOpen()`，模型嘴型跟着声音动
-- **打断（barge-in）**：发新消息或重新朗读时立刻关连接、清播放队列
-- **参数**：请求里的 `speaker` 就是音色 ID（如 `zh_female_cancan_mars_bigtts`）；
-  `X-Api-Resource-Id` 默认 `volc.service_type.10029`（语音合成大模型），换成 2.0 模型时改成 `seed-tts-2.0`
-- **服务端报错**会以 `0x94` 帧带回 `code` + `message`，App 直接把它显示成一条聊天气泡，方便对着改配置
+**没有声音 / 不朗读**
+检查手机媒体音量；设置里语音朗读的 App ID、Access Token、音色 ID 是否填全，点「试听一句」验证。
 
-## 语音识别（本地离线 ASR）
+**语音识别没反应**
+设置 → 语音输入 → 灵敏度调到「灵敏」；或离麦克风近一点。电话模式开着时图标是红色并呼吸的。
 
-- **模型**：阿里达摩院 FunASR 的 **Paraformer-zh-small**（2024-03-09 版），经 [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) 导出成 onnx
-- **运行时**：sherpa-onnx 官方 Android AAR（`app/libs/sherpa-onnx-1.13.8.aar`，含各 ABI 的 so + Kotlin API）
-- **流程**：`AudioRecord` 录 16kHz 单声道 → 按下停止时把整段音频喂给 Paraformer 解码 → 文字追加到输入框
-- **实测速度**（模拟器 CPU）：模型加载约 1.5~2.6 秒；3 秒音频解码 66ms、33 秒音频 750ms
-- **模型参数**写在 `app/src/main/java/com/example/dsaiapp/asr/AsrEngine.kt` 顶部（`MODEL` / `TOKENS` 常量），
-  换模型只要替换 `app/src/main/assets/asr/` 下的文件
-- 录音上限 60 秒（超过自动停止并识别），识别为空会提示重说，不会崩
+**搜索没结果**
+内置搜索靠解析 Bing 网页，Bing 改版可能失效；这时换「博查」（国内直连、中文好）并填 API Key。
 
-### 模型与运行时的版本要对上（重要）
+**屏幕不会自动黑**
+有意设计：前台保持常亮，免得语音聊天中途息屏被打断。切到后台会立刻释放麦克风和播放器。
 
-sherpa-onnx **初始化失败时会直接 `exit(-1)`**（表现为进程静默消失、无 Java 异常，
-`dumpsys activity exit-info` 里是 `reason=1 (EXIT_SELF) status=255`）。
-最常见的原因就是**模型太旧、元数据对不上**：例如 `streaming-zipformer-multi-zh-hans-int8-2023-12-13`
-配 1.13.8 运行时会在读 encoder metadata 时报 `'attention_dims' does not exist in the metadata` 然后退出。
-换用与运行时同代的模型（如这里的 Paraformer-2024）即可。
+**她不知道今天几号**
+不会——每次请求都会把当前日期、星期、时间告诉她。
+
+---
 
 ## 目录结构
 
-```text
-app/src/main/java/com/example/dsaiapp/
-├── MainActivity.kt          # 全部 UI（Compose）：顶栏 / 舞台 / 聊天 / 设置对话框 / 输入栏（含语音按钮）
-├── asr/
-│   └── AsrEngine.kt         # 本地离线 ASR：录音 + Paraformer 解码（sherpa-onnx）
-├── tts/
-│   └── TtsEngine.kt         # 豆包双向流式 TTS：WS 帧编解码 + AudioTrack 边收边放 + 口型音量
-├── chat/
-│   ├── DeepSeekClient.kt    # DeepSeek API 最小客户端（HttpURLConnection + org.json，零依赖）
-│   └── ModelReactions.kt    # 回复关键字 → 表情/动作 映射表
-├── live2d/
-│   ├── Live2DDelegate.java  # 全局单例：GL 生命周期 / 投影矩阵 / 模型注册表与切换
-│   ├── Live2DModel.java     # 通用模型：加载 / 手写待机动画 / 表情 / 动作 / 水印压制
-│   ├── Live2DGLView.java    # GLSurfaceView + 触摸视线
-│   ├── Live2DTextureManager.java  # 纹理上传（含 glGenerateMipmap，缺它模型全黑！）
-│   └── CubismPal.java       # 平台胶水：assets 读文件 / 日志
-└── ui/                      # Compose 包装 + 主题配色
-app/src/main/java/com/live2d/…      # Cubism SDK for Java 5-r.5 框架源码
-app/src/main/assets/live2d/         # 两只 Live2D 模型的 model3.json / moc3 / 贴图 / 表情 / 动作
-app/src/main/assets/asr/            # Paraformer 语音模型（model.int8.onnx 约 78MB + tokens.txt）
-app/libs/Live2DCubismCore.aar       # Cubism Core（含各 ABI 的 so）
-app/libs/sherpa-onnx-1.13.8.aar     # ASR 运行时（含各 ABI 的 so + Kotlin API）
-app/src/main/keepRules/rules.keep   # R8 必须保留的 JNI 类（Live2D Core / sherpa-onnx）
-LICENSE             # 模型与第三方组件的署名、开源协议（必读）
+```
+DSAIAPP/                         Android 工程
+├── app/src/main/
+│   ├── java/com/example/dsaiapp/
+│   │   ├── MainActivity.kt        界面与流程（聊天、设置、存档、编辑模式）
+│   │   ├── asr/AsrEngine.kt       本地离线语音识别
+│   │   ├── tts/TtsEngine.kt       豆包双向流式 TTS + 播放
+│   │   ├── chat/                  DeepSeek 客户端、搜索、表情映射
+│   │   ├── live2d/                Cubism 渲染、模型、GL 视图
+│   │   └── ui/live2d/             Compose 包装与控制器
+│   ├── assets/asr/                离线识别模型
+│   ├── assets/live2d/             两个 Live2D 模型
+│   └── libs/                      Cubism Core、sherpa-onnx 运行时
+└── build.gradle.kts
+LICENSE                          项目许可（Apache-2.0）
+THIRD-PARTY-NOTICES.md           第三方资源与模型署名
 ```
 
-> 仓库里最大的两个文件是 ASR 模型（78MB）和 sherpa-onnx AAR（48MB）——它们让仓库能直接构建出可用 App，
-> 但也让 git 仓库变重（约 136MB）。不想要大文件的话，把这两项从 git 里去掉，改成首次运行时从
-> [sherpa-onnx releases](https://github.com/k2-fsa/sherpa-onnx/releases) 下载也可以。
+---
 
-## 排查备忘
+## 版权与致谢
 
-| 症状 | 原因 |
-| --- | --- |
-| 模型整体黑色剪影 | 纹理没生成 mipmap，而框架绘制时用 mipmap 过滤采样，不完整纹理采出纯黑。上传后必须调 glGenerateMipmap |
-| 模型消失 / 只剩背景 | 渲染器创建前没设置离屏目标尺寸；或 GL 上下文重建后没有重建渲染器和纹理绑定 |
-| 开 R8 后一启动就闪退 | Live2D Core 的 `JNI_OnLoad` 按类名 `FindClass` 找类，被 R8 改名就 `ClassNotFoundException` 直接 abort。见 `keepRules/rules.keep` |
-| 语音按钮一按进程就没了 | sherpa-onnx 模型初始化失败会 `exit(-1)`（`exit-info` 里 `reason=1 (EXIT_SELF) status=255`），通常是模型与运行时版本不匹配 |
-| 语音识别总是"没听清" | 模拟器的虚拟麦克风基本收不到人声，真机测试才准；也确认已授予录音权限 |
-| 朗读不出声 / 报「语音服务报错」 | 多半是凭证或资源 ID 不对：App ID、Access Token、音色 ID 三者要配套，资源 ID 默认 `volc.service_type.10029`。报错原文会显示在聊天气泡里 |
-| 朗读时提示连接失败 | TTS 是云端接口，模拟器/校园网连不上外网时会失败（离线 ASR 不受影响，它纯本地） |
-| 电话模式下她"听见自己说话"、自动发送一堆垃圾 | 朗读结束判定用了"服务端发完音频"，而此时 AudioTrack 里还压着 1~2 秒缓冲。必须等播放头追上写入帧数再开麦 |
-| 电话模式没完没了地发消息 | 发送后没有把麦克风收起来。发送→等回复→朗读这段时间都应该保持静音，只有真轮到用户说话才开麦 |
-| Live2D 模型高频抖动（"抽"） | 别给渲染限帧。模型的 dt 取真实帧间隔，限到 30fps 后 dt 从 ~16ms 变 ~33ms，带 Cubism 物理的模型会过冲震荡。省电请靠「切后台 onPause」 |
-| 打开 App 一会儿就黑屏 | 窗口没加 `FLAG_KEEP_SCREEN_ON`。这是盯着看的陪伴类 App，前台应保持常亮 |
-| 模拟器里 DNS/网络报错 | 校园网等环境下模拟器 NAT 容易失效，真机加正常网络即可，跟 API Key 无关 |
-| gradle 锁文件拒绝访问 | 命令行构建要写用户目录下的 .gradle，沙箱或权限需放行该目录 |
+- 本仓库以 **Apache License 2.0** 发布，全文见 [`LICENSE`](LICENSE)
+- 第三方组件与两个 Live2D 模型的**署名、来源、许可**见 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)
+  - 模型「大肥鱼」：B 站 UP 主 **Mao绒绒家园**，开源模型，版权归原作者
+  - 模型「DeepSeek」：来源 [github.com/lrplrplrp/dsh-live2d](https://github.com/lrplrplrp/dsh-live2d)，Apache-2.0
+  - Live2D Cubism SDK for Java 5-r.5：© Live2D Inc.，Live2D Open Software License
+  - 语音识别：阿里达摩院 FunASR Paraformer + [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)（Apache-2.0）
+  - 网络库：OkHttp（Apache-2.0）
 
-## 资源与致谢
-
-两个 Live2D 模型均为**开源模型，版权归原作者所有，本仓库按作者要求保留署名**。完整署名与协议全文见仓库根目录的 **LICENSE**：
-
-- **模型1「大肥鱼」**：作者 **B站 @Mao绒绒家园**
-- **模型2「DeepSeek」**：来源 github.com/lrplrplrp/dsh-live2d，协议 Apache License 2.0
-- **Cubism SDK for Java 5-r.5**：© Live2D Inc.，Live2D Open Software License；公开分发前请自行确认 Live2D 的 SDK 发行许可（个人/小规模通常免费，商用前问一次 Live2D 官方）
-- **语音识别模型**：阿里达摩院 **FunASR / Paraformer**（经 sherpa-onnx 导出为 onnx），协议以 FunASR 与模型仓库说明为准
-- **sherpa-onnx**：k2-fsa 开源项目（Apache License 2.0），提供本地推理运行时
-- **OkHttp**：Square 开源项目（Apache License 2.0），TTS 的 WebSocket 客户端
-- **语音合成服务**：[火山引擎豆包语音](https://www.volcengine.com/product/voice-tech)（TTS 为云端接口，按量计费，需自行开通）
-- API 服务：DeepSeek Open Platform（platform.deepseek.com）
-
-## TODO
-
-- [ ] 语音输入加 VAD 自动断句（现在要手动按第二下停止）
-- [ ] 流式输出（SSE）+ 边生成边朗读
-- [ ] 对话历史持久化
-- [ ] 表情随 API 返回的结构化情绪标签联动（现在是文本关键字匹配）
+感谢以上作者与项目。
