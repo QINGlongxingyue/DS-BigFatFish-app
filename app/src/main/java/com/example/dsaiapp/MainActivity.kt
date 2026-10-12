@@ -685,63 +685,16 @@ private fun ChatScreen() {
                         }
                     }
 
-                    // ---- 工具通道：只给「现成的查询工具」，模型负责给查询词 ----
-                    // 不暴露 http_get 那种原始 HTTP 工具 —— 让模型自己拼 URL/请求既不可靠也不安全，
-                    // 请求和解析都该由 App 干。deepseek-flash 不支持 function calling，
-                    // 那就不发 tools，走本地关键词判断 + 预搜索。
-                    val supportsTools = deepseekModel != DeepSeekClient.MODEL_FLASH
-                    val tools = if (supportsTools && searchSettings.isReady()) {
-                        listOf(SearchClient.toolSpec())
-                    } else {
-                        emptyList()
-                    }
-
-                    val result = if (tools.isEmpty()) {
-                        DeepSeekClient.chat(apiKey, history, deepseekModel)
-                    } else {
-                        DeepSeekClient.chatWithTools(
-                            apiKey = apiKey,
-                            history = history,
-                            model = deepseekModel,
-                            tools = tools,
-                            maxRounds = 3,
-                            toolRunner = { call ->
-                                android.util.Log.d(
-                                    "DSAI-Chat",
-                                    "工具调用 ${call.name}(${call.argumentsJson})",
-                                )
-                                when (call.name) {
-                                    // 模型只给查询词；用什么搜索服务、怎么解析都由 App 决定
-                                    "web_search" -> SearchClient.runToolCall(
-                                        call.argumentsJson,
-                                        searchSettings.toEngineConfig(),
-                                    )
-                                    else -> "未知工具：${call.name}"
-                                }
-                            },
-                        ).recoverCatching { e ->
-                            // ⚠️ 必须区分原因，别一律说"不支持工具调用"（会误导排查）
-                            val realReason = if (e is UnsupportedOperationException) {
-                                "该模型不支持工具调用"
-                            } else {
-                                "工具调用出错：${e.message}"
-                            }
-                            android.util.Log.w("DSAI-Chat", "工具路径失败（$realReason），退回普通对话")
-                            messages.add(
-                                ChatMessage(
-                                    nextId++,
-                                    "（$realReason ，这次已退回普通对话，回答里可能没有联网资料）",
-                                    fromUser = false,
-                                )
-                            )
-                            DeepSeekClient.chat(apiKey, history, deepseekModel).getOrThrow()
-                        }
-                    }
+                    // ---- 联网：不再依赖模型"配不配合" ----
+                    // 之前用 function calling 让模型自己决定调不调工具，实测它经常不调
+                    // （小模型尤其如此），于是把决定权收回 App：🔍 开着、或命中时效性/问句特征，
+                    // 就先搜好、连来源写进 system，模型只负责读资料回答。
+                    val result = DeepSeekClient.chat(apiKey, history, deepseekModel)
                     android.util.Log.d(
                         "DSAI-Chat",
                         "已发请求：模型=$deepseekModel，system ${history.first().content.length} 字，" +
                             "时间注入=${history.first().content.contains("现在是 ")}，" +
-                            "工具=${tools.map { it.name }}，预设搜索=${searchBlock != null}",
+                            "联网搜索=${if (searchBlock != null) "已注入资料" else "没查"}",
                     )
                     isTyping = false
                     result.onSuccess { reply ->
@@ -1824,6 +1777,7 @@ private fun SettingsDialog(
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     listOf(
                         SearchClient.PROVIDER_BING to "内置(免Key)",
+                        SearchClient.PROVIDER_BAIDU to "百度",
                         SearchClient.PROVIDER_BOCHA to "博查",
                         SearchClient.PROVIDER_TAVILY to "Tavily",
                     ).forEach { (id, label) ->
@@ -1853,17 +1807,16 @@ private fun SettingsDialog(
                         label = "搜索 API Key",
                         value = searchDraft.apiKey,
                         onValueChange = { searchDraft = searchDraft.copy(apiKey = it) },
-                        hint = if (searchDraft.provider == SearchClient.PROVIDER_BOCHA) {
-                            "bochaai.com 的 API Key"
-                        } else {
-                            "tavily.com 的 API Key（tvly-…）"
+                        hint = when (searchDraft.provider) {
+                            SearchClient.PROVIDER_BAIDU -> "百度智能云千帆的 API Key（bce-v3/…）"
+                            SearchClient.PROVIDER_BOCHA -> "bochaai.com 的 API Key"
+                            else -> "tavily.com 的 API Key（tvly-…）"
                         },
                     )
                 }
                 Text(
-                    text = "内置搜索不用填任何 Key：App 直接解析 Bing 网页结果，" +
-                        "模型只负责给查询词，请求和解析都由 App 干（Bing 改版可能失效，" +
-                        "那时换博查/Tavily）。博查中文强、国内直连；Tavily 英文强。",
+                    text = "内置搜索免 Key（App 直接解析 Bing 网页，改版可能失效）。" +
+                        "百度 AI 搜索申请门槛低、国内直连、中文好，推荐；博查中文也不错；Tavily 英文强。",
                     color = TextSecondary,
                     fontSize = 11.sp,
                     lineHeight = 15.sp,

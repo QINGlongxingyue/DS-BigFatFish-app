@@ -34,6 +34,13 @@ object SearchClient {
      */
     const val PROVIDER_BING = "bing"
 
+    /**
+     * 百度 AI 搜索（千帆）：[文档](https://cloud.baidu.com/doc/qianfan-api/s/Wmbq4z7e5)
+     * `POST https://qianfan.baidubce.com/v2/ai_search/web_search`，`Authorization: Bearer <API Key>`。
+     * 申请门槛低、国内直连，中文检索是主场。
+     */
+    const val PROVIDER_BAIDU = "baidu"
+
     /** 一条搜索结果。 */
     data class Item(val title: String, val snippet: String, val url: String)
 
@@ -49,6 +56,7 @@ object SearchClient {
 
         fun providerName(): String = when (provider) {
             PROVIDER_BOCHA -> "博查"
+            PROVIDER_BAIDU -> "百度"
             PROVIDER_BING -> "内置搜索"
             else -> "Tavily"
         }
@@ -69,6 +77,7 @@ object SearchClient {
     fun search(query: String, config: Config, max: Int = 5): Result<List<Item>> = try {
         val items = when (config.provider) {
             PROVIDER_BOCHA -> searchBocha(query, config.apiKey, max)
+            PROVIDER_BAIDU -> searchBaidu(query, config.apiKey, max)
             PROVIDER_BING -> searchBing(query, max)
             else -> searchTavily(query, config.apiKey, max)
         }
@@ -77,6 +86,63 @@ object SearchClient {
     } catch (t: Throwable) {
         Log.e(TAG, "搜索失败", t)
         Result.failure(t)
+    }
+
+    // ------------------------------------------------------------------
+    // 百度 AI 搜索（千帆）
+    // ------------------------------------------------------------------
+    private fun searchBaidu(query: String, key: String, max: Int): List<Item> {
+        val body = JSONObject()
+            .put(
+                "messages",
+                org.json.JSONArray().put(
+                    JSONObject().put("role", "user").put("content", query),
+                ),
+            )
+            .put("search_source", "baidu_search_v2")
+            .put(
+                "resource_type_filter",
+                org.json.JSONArray().put(
+                    JSONObject().put("type", "web").put("top_k", max),
+                ),
+            )
+            .toString()
+
+        val req = Request.Builder()
+            .url("https://qianfan.baidubce.com/v2/ai_search/web_search")
+            .header("Authorization", "Bearer $key")
+            .post(body.toRequestBody(jsonType))
+            .build()
+
+        http.newCall(req).execute().use { resp ->
+            val text = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) error("百度 HTTP ${resp.code}：${text.take(160)}")
+            val root = JSONObject(text)
+
+            // 官方返回是 references[]；字段名做多重兜底，改版也不至于全废
+            val refs = root.optJSONArray("references")
+                ?: root.optJSONArray("search_results")
+                ?: root.optJSONArray("items")
+                ?: return emptyList()
+
+            return (0 until refs.length()).mapNotNull { i ->
+                val o = refs.optJSONObject(i) ?: return@mapNotNull null
+                val url = o.optString("url").ifBlank { o.optString("link") }
+                val stamp = o.optString("date").trim()
+                val text = o.optString("content")
+                    .ifBlank { o.optString("snippet") }
+                    .ifBlank { o.optString("summary") }
+                    .ifBlank { o.optString("abstract") }
+                    .replace('\n', ' ')
+                    .trim()
+                Item(
+                    title = o.optString("title").ifBlank { o.optString("name") }.ifBlank { url },
+                    // 带上发布时间：模型好判断这条是不是最新的（百度返回里有 date 字段）
+                    snippet = if (stamp.isNotEmpty()) "（$stamp）$text" else text,
+                    url = url,
+                )
+            }.filter { it.url.isNotEmpty() || it.snippet.isNotEmpty() }
+        }
     }
 
     // ------------------------------------------------------------------
