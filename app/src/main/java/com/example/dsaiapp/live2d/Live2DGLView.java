@@ -70,6 +70,14 @@ public class Live2DGLView extends GLSurfaceView {
         return editMode;
     }
 
+    /**
+     * 背景透明（桌面悬浮窗用）：清屏色改成「白色 + alpha=0」，
+     * 只留模型，其余地方透出桌面。
+     */
+    public void setTransparentBackground(boolean transparent) {
+        Live2DDelegate.getInstance().setTransparentBackground(transparent);
+    }
+
     /** 两指之间的距离。 */
     private static float span(MotionEvent e) {
         if (e.getPointerCount() < 2) return 0f;

@@ -48,6 +48,23 @@ public final class Live2DDelegate {
     private static final float STAGE_CLEAR_G = 0.960f;
     private static final float STAGE_CLEAR_B = 0.990f;
 
+    /**
+     * 悬浮窗（桌面宠物）模式：背景要全透明，只留模型。
+     *
+     * <p>技巧是清成「白色 + alpha=0」而不是「黑色 + alpha=0」：乘算混合读的是目标色，
+     * 目标色是白的话乘算结果仍然是原色，而 alpha=0 让没画到的地方透出桌面。
+     */
+    private volatile boolean transparentBackground = false;
+
+    /** 上次重建渲染器用的尺寸，避免重复重建。 */
+    private int rendererWidth = -1;
+    private int rendererHeight = -1;
+
+    /** 切换背景透明（悬浮窗用）。 */
+    public void setTransparentBackground(boolean transparent) {
+        this.transparentBackground = transparent;
+    }
+
     private static volatile Live2DDelegate instance;
     private static Application application;
 
@@ -324,12 +341,35 @@ public final class Live2DDelegate {
         modelRenderTargetHeight = viewHeight;
         if (model != null) {
             model.setRenderTargetSize(viewWidth, viewHeight);
+
+            // ⚠️ 尺寸变了（主界面舞台 ↔ 桌面悬浮窗、或转屏）必须重建模型：
+            // 裁剪蒙版缓冲、drawable 的索引缓存都是按尺寸建的。
+            // 试过 model.rebuildRenderer()，它会把 CubismDrawableInfoCachesHolder 弄成 null
+            // 然后下一帧 NPE 崩在 GLThread；所以这里直接释放重载，一次性 200ms 左右最稳。
+            if (viewWidth != rendererWidth || viewHeight != rendererHeight) {
+                rendererWidth = viewWidth;
+                rendererHeight = viewHeight;
+                CubismPal.log("尺寸变化 -> 重新加载模型: " + viewWidth + "x" + viewHeight);
+                try {
+                    model.release();
+                } catch (Throwable ignored) {
+                    // 释放失败也继续重载，不能卡在这里
+                }
+                model = null;
+                modelInitAttempted = false; // 让下一帧 ensureModelReady() 重新加载
+            }
         }
     }
 
     public void onDrawFrame() {
-        // 清成浅色不透明舞台（原因见 STAGE_CLEAR_* 的注释）
-        GLES20.glClearColor(STAGE_CLEAR_R, STAGE_CLEAR_G, STAGE_CLEAR_B, 1f);
+        // 悬浮窗要全透明（桌面宠物），主界面要浅色不透明舞台（乘算混合需要）
+        if (transparentBackground) {
+            // ⚠️ 必须是 (0,0,0,0)：Surface 的缓冲按**预乘 alpha** 解释，
+            // 清成 (1,1,1,0)（RGB > alpha）属于非法预乘，合成器会当成不透明 → 白底。
+            GLES20.glClearColor(0f, 0f, 0f, 0f);
+        } else {
+            GLES20.glClearColor(STAGE_CLEAR_R, STAGE_CLEAR_G, STAGE_CLEAR_B, 1f);
+        }
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
         GLES20.glEnable(GLES20.GL_BLEND);
 

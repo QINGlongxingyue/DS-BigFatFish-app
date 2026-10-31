@@ -83,6 +83,7 @@ import com.example.dsaiapp.chat.DeepSeekClient
 import com.example.dsaiapp.chat.HttpProbe
 import com.example.dsaiapp.chat.ModelReactions
 import com.example.dsaiapp.chat.SearchClient
+import com.example.dsaiapp.desktop.DesktopPetService
 import com.example.dsaiapp.tts.TtsEngine
 import com.example.dsaiapp.ui.live2d.Live2DController
 import com.example.dsaiapp.ui.live2d.Live2DStage
@@ -117,6 +118,24 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    /**
+     * 桌面宠物用 CLEAR_TOP + SINGLE_TOP 复用本实例，框架只回调这里，
+     * 必须自己 setIntent，否则 onResume 读不到「直接进电话模式」的参数。
+     */
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+    }
+
+    /**
+     * 界面被销毁（返回键/系统回收）时告诉桌宠服务"App 已经不在前台了"，
+     * 否则 appForeground 会一直停在 true，悬浮窗永远不出现。
+     */
+    override fun onDestroy() {
+        DesktopPetService.onAppForegroundChanged(false)
+        super.onDestroy()
     }
 }
 
@@ -481,6 +500,28 @@ private fun saveSearchSettings(prefs: android.content.SharedPreferences, s: Sear
 }
 
 // ---------------------------------------------------------------------------
+// 桌面悬浮窗（大肥鱼出现在桌面上）
+// ---------------------------------------------------------------------------
+
+private const val PREF_DESKTOP_PET = "desktop_pet"
+
+/** 有悬浮窗权限吗。 */
+private fun canDrawOverlay(context: android.content.Context): Boolean =
+    android.provider.Settings.canDrawOverlays(context)
+
+/** 申请悬浮窗权限（跳到系统设置页）。 */
+private fun requestOverlayPermission(context: android.content.Context) {
+    runCatching {
+        context.startActivity(
+            android.content.Intent(
+                android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                android.net.Uri.parse("package:${context.packageName}"),
+            ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK),
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 语音输入灵敏度
 // ---------------------------------------------------------------------------
 
@@ -556,6 +597,7 @@ private fun ChatScreen() {
     var showChatHistory by remember { mutableStateOf(false) }
     var chatSessions by remember { mutableStateOf(loadChatSessions(prefs)) }
     var editLive2d by remember { mutableStateOf(false) }
+    var desktopPet by remember { mutableStateOf(prefs.getBoolean(PREF_DESKTOP_PET, false)) }
     var isTyping by remember { mutableStateOf(false) }
 
     // ---- 豆包 TTS 朗读 ----
@@ -833,9 +875,25 @@ private fun ChatScreen() {
                     // 保持 asrOn 状态，但把麦克风收掉；回前台自动接着听
                     if (asr.isRecording) asr.cancel()
                     tts.stop()
+                    // 桌面宠物：回到后台才让它接管渲染（避免和主界面抢单例模型）
+                    DesktopPetService.onAppForegroundChanged(false)
                 }
                 androidx.lifecycle.Lifecycle.Event.ON_RESUME -> {
+                    DesktopPetService.onAppForegroundChanged(true)
                     resumeListening()
+                    // 从桌面宠物点"电话模式"进来的：直接开听
+                    val wantVoice = (context as? android.app.Activity)?.intent
+                        ?.getBooleanExtra(DesktopPetService.EXTRA_START_VOICE, false) == true
+                    if (wantVoice && !asrOn) {
+                        (context as? android.app.Activity)?.intent
+                            ?.removeExtra(DesktopPetService.EXTRA_START_VOICE)
+                        if (asr.hasPermission()) startAsr()
+                        else micPermission.launch(Manifest.permission.RECORD_AUDIO)
+                    }
+                    // 刚从系统设置里授完悬浮窗权限回来：把服务补启动
+                    if (desktopPet && !DesktopPetService.running && canDrawOverlay(context)) {
+                        DesktopPetService.start(context)
+                    }
                 }
                 else -> Unit
             }
@@ -1006,6 +1064,21 @@ private fun ChatScreen() {
             persona = persona,
             asrSensitivity = asrSensitivity,
             search = searchSettings,
+            desktopPet = desktopPet,
+            onDesktopPetChange = { want ->
+                desktopPet = want
+                prefs.edit().putBoolean(PREF_DESKTOP_PET, want).apply()
+                if (want) {
+                    if (canDrawOverlay(context)) {
+                        DesktopPetService.start(context)
+                    } else {
+                        // 没权限就先引导去授权；回来后在 onResume 里补启动
+                        requestOverlayPermission(context)
+                    }
+                } else {
+                    DesktopPetService.stop(context)
+                }
+            },
             onSave = { newKey, newModel, newTts, newPersona, newSensitivity, newSearch ->
                 apiKey = newKey
                 prefs.edit().putString(PREF_KEY, newKey).apply()
@@ -1638,17 +1711,21 @@ private fun SettingsDialog(
     persona: PersonaSettings,
     asrSensitivity: Int,
     search: SearchSettings,
+    desktopPet: Boolean,
+    onDesktopPetChange: (Boolean) -> Unit,
     onSave: (String, String, TtsSettings, PersonaSettings, Int, SearchSettings) -> Unit,
     onTest: (TtsSettings) -> Unit,
     onEditLive2d: () -> Unit,
     onDismiss: () -> Unit,
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
     var key by remember { mutableStateOf(deepseekKey) }
     var modelDraft by remember { mutableStateOf(deepseekModel) }
     var draft by remember { mutableStateOf(tts) }
     var personaDraft by remember { mutableStateOf(persona) }
     var asrDraft by remember { mutableStateOf(asrSensitivity) }
     var searchDraft by remember { mutableStateOf(search) }
+    var desktopPetDraft by remember { mutableStateOf(desktopPet) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1829,6 +1906,46 @@ private fun SettingsDialog(
                     lineHeight = 15.sp,
                     modifier = Modifier.padding(top = 4.dp),
                 )
+
+                Spacer(modifier = Modifier.height(14.dp))
+                SettingsSectionTitle("桌面宠物")
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("在桌面显示大肥鱼（悬浮窗）", color = TextPrimary, fontSize = 14.sp)
+                        Text(
+                            text = "开启后她会浮在其它应用之上：点她打开对话、拖动可移位、" +
+                                "📞 进电话模式、⌄ 收起按钮（点 ⌃ 再展开）。回到 App 里时悬浮窗自动收起。",
+                            color = TextSecondary,
+                            fontSize = 11.sp,
+                            lineHeight = 15.sp,
+                        )
+                    }
+                    Switch(
+                        checked = desktopPetDraft,
+                        onCheckedChange = {
+                            // 先更新草稿：否则开关视觉上永远不勾（之前就漏了这步）
+                            desktopPetDraft = it
+                            onDesktopPetChange(it)
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = DeepSea,
+                            checkedTrackColor = WhaleCyan,
+                        ),
+                    )
+                }
+                if (desktopPetDraft && !canDrawOverlay(context)) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "还没给「显示在其他应用上层」权限",
+                            color = Color(0xFFFFC46B),
+                            fontSize = 11.sp,
+                        )
+                        TextButton(onClick = { requestOverlayPermission(context) }) {
+                            Text("去授权", color = WhaleCyan, fontSize = 12.sp)
+                        }
+                    }
+                }
 
                 Spacer(modifier = Modifier.height(14.dp))
                 SettingsSectionTitle("Live2D 显示")
