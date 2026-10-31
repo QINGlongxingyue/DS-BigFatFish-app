@@ -130,6 +130,7 @@ class DesktopPetService : Service() {
 
     // ---- 悬浮窗内的电话模式 ----
     private val asr by lazy { com.example.dsaiapp.asr.AsrEngine(this) }
+    private val tts by lazy { com.example.dsaiapp.tts.TtsEngine() }
     private var voiceMode = false
     private var asrWired = false
 
@@ -173,30 +174,30 @@ class DesktopPetService : Service() {
                 },
             )
         }
+        startForeground(NOTIFICATION_ID, buildNotification())
+    }
 
+    /** 常驻通知（前台服务必需）。 */
+    private fun buildNotification(): Notification {
         val open = PendingIntent.getActivity(
             this,
             0,
             Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
-
         val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             Notification.Builder(this, CHANNEL_ID)
         } else {
             @Suppress("DEPRECATION")
             Notification.Builder(this)
         }
-        startForeground(
-            NOTIFICATION_ID,
-            builder
-                .setContentTitle("大肥鱼在桌面上")
-                .setContentText("点通知回到 App，或在设置里关掉桌面显示")
-                .setSmallIcon(R.drawable.ic_chat_history)
-                .setContentIntent(open)
-                .setOngoing(true)
-                .build(),
-        )
+        return builder
+            .setContentTitle("大肥鱼在桌面上")
+            .setContentText("点通知回到 App，或在设置里关掉桌面显示")
+            .setSmallIcon(R.drawable.ic_chat_history)
+            .setContentIntent(open)
+            .setOngoing(true)
+            .build()
     }
 
     // ------------------------------------------------------------------
@@ -458,6 +459,32 @@ class DesktopPetService : Service() {
         )
         column.addView(titleRow)
 
+        // 按住标题/边框可以拖动聊天框
+        val dragChat = View.OnTouchListener { _, ev ->
+            val lp = chatParams ?: return@OnTouchListener false
+            when (ev.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    chatDragStartX = lp.x
+                    chatDragStartY = lp.y
+                    chatDragDownX = ev.rawX
+                    chatDragDownY = ev.rawY
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    lp.x = chatDragStartX + (ev.rawX - chatDragDownX).toInt()
+                    lp.y = chatDragStartY + (ev.rawY - chatDragDownY).toInt()
+                    runCatching { windowManager.updateViewLayout(chatRoot, lp) }
+                    true
+                }
+                else -> false
+            }
+        }
+        titleRow.setOnTouchListener(dragChat)
+        column.setOnTouchListener { v, ev ->
+            // 只有按在边框（没落到子控件上）才算拖动
+            if (v.id == column.id && ev.actionMasked == MotionEvent.ACTION_DOWN) false else false
+        }
+
         // 对话内容
         val log = TextView(this).apply {
             setTextColor(Color.parseColor("#D8ECFF"))
@@ -551,8 +578,15 @@ class DesktopPetService : Service() {
         runCatching { windowManager.addView(column, lp) }
             .onFailure { Log.e(TAG, "聊天框添加失败", it) }
         chatRoot = column
+        chatParams = lp
         input.requestFocus()
     }
+
+    private var chatParams: WindowManager.LayoutParams? = null
+    private var chatDragStartX = 0
+    private var chatDragStartY = 0
+    private var chatDragDownX = 0f
+    private var chatDragDownY = 0f
 
     private fun closeChatBox() {
         voiceMode = false
@@ -574,6 +608,18 @@ class DesktopPetService : Service() {
     private fun startVoiceInOverlay() {
         openChatBox()
         voiceMode = true
+
+        // ⚠️ Android 14+ 后台服务要用麦克风，必须把前台服务类型切到 microphone，
+        // 否则 AudioRecord 能建起来但收不到有效声音（表现为"ASR 没干活"）。
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+            runCatching {
+                startForeground(
+                    NOTIFICATION_ID,
+                    buildNotification(),
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE,
+                )
+            }.onFailure { Log.w(TAG, "切麦克风前台类型失败", it) }
+        }
 
         if (!asr.hasPermission()) {
             appendLine("系统：还没给麦克风权限。去 App 里点一次电话图标授权后再来。")
@@ -657,8 +703,7 @@ class DesktopPetService : Service() {
             result.onSuccess { reply ->
                 chatHistory.add(DeepSeekClient.Msg("assistant", reply))
                 appendLine("大肥鱼：$reply")
-                // 电话模式：念完接着听（这里没有 TTS，直接续上）
-                if (voiceMode && chatRoot != null) runCatching { asr.start() }
+                speakInOverlay(reply)
             }.onFailure { e ->
                 appendLine("出错：${e.message}")
                 if (voiceMode && chatRoot != null) runCatching { asr.start() }
@@ -666,8 +711,50 @@ class DesktopPetService : Service() {
         }
     }
 
-    private fun removeLastPlaceholder() {
-        val log = chatLog ?: return
+    /** 桌面模式下也朗读：配好豆包凭据就念，嘴型跟着音量动。 */
+    private fun speakInOverlay(reply: String) {
+        val p = prefs()
+        val appId = p.getString("tts_app_id", "").orEmpty()
+        val token = p.getString("tts_access_token", "").orEmpty()
+        val speaker = p.getString("tts_speaker", "zh_female_cancan_mars_bigtts")
+            .orEmpty().ifBlank { "zh_female_cancan_mars_bigtts" }
+        val resource = p.getString("tts_resource_id", "volc.megatts.default")
+            .orEmpty().ifBlank { "volc.megatts.default" }
+        val auto = p.getBoolean("tts_auto_read", true)
+        if (!auto || appId.isBlank() || token.isBlank()) {
+            // 没配就没有朗读，直接接着听
+            if (voiceMode && chatRoot != null) runCatching { asr.start() }
+            return
+        }
+
+        runCatching {
+            tts.onStart = { if (asr.isRecording) asr.cancel() }
+            tts.onLevel = { level ->
+                if (level > 0.02f) runCatching {
+                    Live2DDelegate.getInstance().model?.setMouthOpen(level)
+                }
+            }
+            tts.onDone = {
+                runCatching { Live2DDelegate.getInstance().model?.setMouthOpen(0f) }
+                if (voiceMode && chatRoot != null) runCatching { asr.start() }
+            }
+            tts.onError = { msg -> appendLine("朗读失败：$msg") }
+            tts.speak(
+                reply,
+                com.example.dsaiapp.tts.TtsEngine.Config(
+                    appId = appId,
+                    accessToken = token,
+                    speaker = speaker,
+                    resourceId = resource,
+                ),
+            )
+        }.onFailure { e ->
+            appendLine("朗读失败：${e.message}")
+            if (voiceMode && chatRoot != null) runCatching { asr.start() }
+        }
+    }
+
+    private fun removeLastPlaceholder() {        val log = chatLog ?: return
         val lines = log.text.toString().lines().toMutableList()
         if (lines.isNotEmpty() && lines.last() == "大肥鱼：…") {
             lines.removeAt(lines.size - 1)
